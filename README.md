@@ -1,4 +1,4 @@
-# wgsl_ping_pong_pipeline
+# wgsl-ping-pong-pipeline
 
 A high-throughput pipelined compute cascade using WGSL and wgpu with isolated per-stage ping-pong buffers for maximum parallel throughput.
 
@@ -61,7 +61,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-wgsl_ping_pong_pipeline = { git = "https://github.com/larsjoost/wgsl_ping_pong_pipeline" }
+wgsl-ping-pong-pipeline = { git = "https://github.com/larsjoost/wgsl-ping-pong-pipeline" }
 ```
 
 ## Quick Start
