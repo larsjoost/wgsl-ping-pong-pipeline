@@ -1,0 +1,24 @@
+[package]
+name = "wgsl-ping-pong-pipeline"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+wgpu = { version = "29.0", features = ["spirv"] }
+pollster = { version = "0.3", features = ["macro"] }
+bytemuck = { version = "1.12", features = ["derive"] }
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.10"
+futures-intrusive = "0.5"
+
+[dev-dependencies]
+
+[[example]]
+name = "builder_example"
+path = "examples/builder_example.rs"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
