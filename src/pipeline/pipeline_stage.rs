@@ -110,6 +110,46 @@ pub trait PipelineStage: Debug {
     fn requires_initialization(&self) -> bool {
         true
     }
+    
+    /// Resizes this stage to handle new dimensions.
+    ///
+    /// This method is called when the pipeline needs to handle data of a different size.
+    /// Stages that support dynamic resizing should update their internal state
+    /// (like batch_size, vector_dim) and recreate any GPU resources that depend on size.
+    ///
+    /// # Arguments
+    /// * `new_batch_size` - The new batch size (number of elements/vectors)
+    /// * `new_vector_dim` - The new vector dimension (2 for complex numbers, etc.)
+    ///
+    /// # Returns
+    /// A Result indicating success or failure of the resize operation.
+    /// Default implementation returns an error - stages that can resize should override this.
+    fn resize(&mut self, _new_batch_size: usize, _new_vector_dim: usize) -> Result<()> {
+        anyhow::bail!("Stage does not support dynamic resizing")
+    }
+    
+    /// Returns true if this stage supports dynamic resizing.
+    ///
+    /// Stages that can handle size changes without full rebuild should return true.
+    /// Default implementation returns false.
+    fn supports_dynamic_resizing(&self) -> bool {
+        false
+    }
+    
+    /// Updates the FFT size parameter for stages that need it.
+    ///
+    /// This is called when the pipeline's FFT size (n) changes but the pipeline
+    /// is not being rebuilt. Stages that use an internal n parameter for FFT
+    /// operations should update it here.
+    ///
+    /// # Arguments
+    /// * `new_n` - The new FFT size
+    ///
+    /// # Returns
+    /// A Result indicating success or failure. Default implementation does nothing.
+    fn update_n(&mut self, _new_n: usize) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Enum representing either a standard Stage or a custom PipelineStage.
@@ -202,6 +242,40 @@ impl<T> StageConfig<T> {
         match self {
             StageConfig::Standard { tag, .. } => tag,
             StageConfig::Custom { tag, .. } => tag,
+        }
+    }
+    
+    /// Returns true if this stage config supports dynamic resizing.
+    pub fn supports_dynamic_resizing(&self) -> bool {
+        match self {
+            StageConfig::Standard { .. } => false, // Standard stages don't support resizing yet
+            StageConfig::Custom { stage, .. } => stage.supports_dynamic_resizing(),
+        }
+    }
+    
+    /// Resizes this stage config to handle new dimensions.
+    /// Only works for custom stages that support dynamic resizing.
+    pub fn resize(&mut self, new_batch_size: usize, new_vector_dim: usize) -> Result<()> {
+        match self {
+            StageConfig::Standard { .. } => {
+                anyhow::bail!("Standard stages do not support dynamic resizing")
+            }
+            StageConfig::Custom { stage, .. } => {
+                stage.resize(new_batch_size, new_vector_dim)
+            }
+        }
+    }
+    
+    /// Updates the FFT size parameter for custom stages that need it.
+    pub fn update_n(&mut self, new_n: usize) -> Result<()> {
+        match self {
+            StageConfig::Standard { .. } => {
+                // Standard stages don't have n parameter
+                Ok(())
+            }
+            StageConfig::Custom { stage, .. } => {
+                stage.update_n(new_n)
+            }
         }
     }
 }
