@@ -114,32 +114,45 @@ pub trait PipelineStage: Debug {
 
 /// Enum representing either a standard Stage or a custom PipelineStage.
 #[derive(Debug)]
-pub enum StageConfig {
-    /// A standard stage with a single WGSL shader
-    Standard(crate::pipeline::Stage),
-    /// A custom stage implementing PipelineStage trait
-    Custom(Box<dyn PipelineStage>),
+pub enum StageConfig<T> {
+    /// A standard stage with a single WGSL shader and optional tag
+    Standard { stage: crate::pipeline::Stage, tag: Option<T> },
+    /// A custom stage implementing PipelineStage trait with optional tag
+    Custom { stage: Box<dyn PipelineStage>, tag: Option<T> },
 }
 
-impl StageConfig {
+impl<T> StageConfig<T> {
     pub fn name(&self) -> &str {
         match self {
-            StageConfig::Standard(stage) => &stage.name,
-            StageConfig::Custom(stage) => stage.name(),
+            StageConfig::Standard { stage, .. } => &stage.name,
+            StageConfig::Custom { stage, .. } => stage.name(),
         }
     }
     
+    pub fn forward_tag(&mut self, new_tag: Option<T>) -> Option<T> {
+        match self {
+            StageConfig::Standard { tag, .. } => {
+                let old_tag = std::mem::replace(tag, new_tag);
+                old_tag
+            }
+            StageConfig::Custom { tag, .. } => {
+                let old_tag = std::mem::replace(tag, new_tag);
+                old_tag
+            }
+        }
+    } 
+
     pub fn vector_dim(&self) -> usize {
         match self {
-            StageConfig::Standard(stage) => stage.vector_dim,
-            StageConfig::Custom(stage) => stage.vector_dim(),
+            StageConfig::Standard { stage, .. } => stage.vector_dim,
+            StageConfig::Custom { stage, .. } => stage.vector_dim(),
         }
     }
     
     pub fn batch_size(&self) -> usize {
         match self {
-            StageConfig::Standard(stage) => stage.batch_size,
-            StageConfig::Custom(stage) => stage.batch_size(),
+            StageConfig::Standard { stage, .. } => stage.batch_size,
+            StageConfig::Custom { stage, .. } => stage.batch_size(),
         }
     }
     
@@ -153,8 +166,8 @@ impl StageConfig {
     
     pub fn validate(&self) -> Result<()> {
         match self {
-            StageConfig::Standard(stage) => stage.validate(),
-            StageConfig::Custom(stage) => {
+            StageConfig::Standard { stage, .. } => stage.validate(),
+            StageConfig::Custom { stage, .. } => {
                 if stage.vector_dim() == 0 {
                     anyhow::bail!("Vector dimension must be at least 1");
                 }
@@ -167,29 +180,37 @@ impl StageConfig {
     }
     
     pub fn is_custom(&self) -> bool {
-        matches!(self, StageConfig::Custom(_))
+        matches!(self, StageConfig::Custom { .. })
     }
     
     pub fn as_custom(&self) -> Option<&dyn PipelineStage> {
         match self {
-            StageConfig::Custom(stage) => Some(stage.as_ref()),
+            StageConfig::Custom { stage, .. } => Some(stage.as_ref()),
             _ => None,
         }
     }
     
     pub fn as_custom_mut(&mut self) -> Option<&mut dyn PipelineStage> {
         match self {
-            StageConfig::Custom(stage) => Some(stage.as_mut()),
+            StageConfig::Custom { stage, .. } => Some(stage.as_mut()),
             _ => None,
+        }
+    }
+    
+    /// Returns a reference to the tag stored in this stage config
+    pub fn tag(&self) -> &Option<T> {
+        match self {
+            StageConfig::Standard { tag, .. } => tag,
+            StageConfig::Custom { tag, .. } => tag,
         }
     }
 }
 
-impl Clone for StageConfig {
+impl<T: Clone> Clone for StageConfig<T> {
     fn clone(&self) -> Self {
         match self {
-            StageConfig::Standard(stage) => StageConfig::Standard(stage.clone()),
-            StageConfig::Custom(_) => {
+            StageConfig::Standard { stage, tag } => StageConfig::Standard { stage: stage.clone(), tag: tag.clone() },
+            StageConfig::Custom { .. } => {
                 // Custom stages cannot be cloned (they may contain non-Clone data)
                 // This is a limitation - in practice, stages should be created fresh
                 panic!("Cannot clone StageConfig::Custom - create a new instance instead");
@@ -247,7 +268,7 @@ mod tests {
     #[test]
     fn test_stage_config_standard() {
         let stage = crate::pipeline::Stage::new("test", "wgsl", 2, 1024);
-        let config = StageConfig::Standard(stage);
+        let config: StageConfig<u64> = StageConfig::Standard { stage, tag: None };
         
         assert_eq!(config.name(), "test");
         assert_eq!(config.vector_dim(), 2);
@@ -262,11 +283,50 @@ mod tests {
             vector_dim: 2,
             batch_size: 2048,
         });
-        let config = StageConfig::Custom(stage);
+        let config: StageConfig<u64> = StageConfig::Custom { stage, tag: None };
         
         assert_eq!(config.name(), "custom_test");
         assert_eq!(config.vector_dim(), 2);
         assert_eq!(config.batch_size(), 2048);
         assert!(config.is_custom());
+    }
+    
+    #[test]
+    fn test_stage_config_forward_tag() {
+        let stage = crate::pipeline::Stage::new("test", "wgsl", 2, 1024);
+        let mut config = StageConfig::<u64>::Standard { stage, tag: Some(42) };
+        
+        // forward_tag should exchange the new tag with the old one
+        let old_tag = config.forward_tag(Some(100));
+        assert_eq!(old_tag, Some(42));
+        assert_eq!(config.tag(), &Some(100));
+        
+        // Test with None
+        let stage2 = crate::pipeline::Stage::new("test2", "wgsl", 2, 1024);
+        let mut config2 = StageConfig::<u64>::Standard { stage: stage2, tag: None };
+        let old_tag2 = config2.forward_tag(Some(200));
+        assert_eq!(old_tag2, None);
+        assert_eq!(config2.tag(), &Some(200));
+    }
+    
+    #[test]
+    fn test_stage_config_forward_tag_custom() {
+        let stage = Box::new(TestStage {
+            name: "custom_test".to_string(),
+            vector_dim: 2,
+            batch_size: 2048,
+        });
+        let mut config = StageConfig::<String>::Custom { stage, tag: Some("initial".to_string()) };
+        
+        let old_tag = config.forward_tag(Some("new".to_string()));
+        assert_eq!(old_tag, Some("initial".to_string()));
+        
+        // Verify new tag is stored
+        match &config {
+            StageConfig::Custom { tag, .. } => {
+                assert_eq!(tag, &Some("new".to_string()));
+            }
+            _ => panic!("Expected Custom variant"),
+        }
     }
 }

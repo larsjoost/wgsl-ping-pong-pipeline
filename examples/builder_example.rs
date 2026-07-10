@@ -30,14 +30,14 @@ async fn main() -> anyhow::Result<()> {
     let stage3 = Stage::new("stage3", IDENTITY_2D, 2, 1024);
 
     // Use the builder pattern: pipe().pipe().build()
-    let mut pipeline = Pipeline::new()
+    let mut pipeline: Pipeline<u64> = Pipeline::new()
         .pipe(stage1)
         .pipe(stage2)
         .pipe(stage3)
         .build()
         .await?;
 
-    println!("✓ Pipeline built successfully!");
+    println!("Pipeline built successfully!");
     println!("  Stages: {}", pipeline.num_stages());
     println!("  Vector dimension: {}", pipeline.vector_dim());
     println!("  Batch size: {}", pipeline.batch_size());
@@ -47,24 +47,21 @@ async fn main() -> anyhow::Result<()> {
 
     // Write input
     pipeline.write_input(&input).await?;
-    println!("✓ Input written");
+    println!("Input written");
 
     // Tick the pipeline
     for i in 0..pipeline.num_stages() {
-        pipeline.tick().await?;
-        println!("✓ Tick {}", i + 1);
+        let _output_tag = pipeline.tick(1u64).await?;
+        println!("Tick {}", i + 1);
     }
 
-    // Read output
-    let output = pipeline.read_output().await?;
-    println!("✓ Output read ({} elements)", output.len());
-
-    // Since we used identity shaders, output should equal input
-    if output == input {
-        println!("✓ Pipeline works correctly (identity shaders)");
-    } else {
-        println!("✗ Output differs from input");
-    }
+    // Read output (returns Option<(tag, data)>)
+    let Some((output_tag, output)) = pipeline.read_output().await? else {
+        println!("Output not ready yet");
+        return Ok(());
+    };
+    println!("Output read: {} elements, tag: {:?}", output.len(), output_tag);
+    println!("Output matches input (first {} elements): {}", input.len(), output[..input.len()] == input);
 
     Ok(())
 }

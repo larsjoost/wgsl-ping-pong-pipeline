@@ -95,33 +95,38 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
 
 /// Pipeline builder.
 #[derive(Debug, Default)]
-pub struct PipelineBuilder {
-    stages: Vec<StageConfig>,
+pub struct PipelineBuilder<T> {
+    stages: Vec<StageConfig<T>>,
     context: Option<Arc<ComputeContext>>,
+    _phantom: std::marker::PhantomData<T>,
 }
 
-impl PipelineBuilder {
+impl<T: Clone> PipelineBuilder<T> {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            stages: Vec::new(),
+            context: None,
+            _phantom: std::marker::PhantomData,
+        }
     }
 
     pub fn pipe(mut self, stage: Stage) -> Self {
-        self.stages.push(StageConfig::Standard(stage));
+        self.stages.push(StageConfig::Standard { stage, tag: None });
         self
     }
 
     pub fn pipe_custom(mut self, stage: Box<dyn PipelineStage>) -> Self {
-        self.stages.push(StageConfig::Custom(stage));
+        self.stages.push(StageConfig::Custom { stage, tag: None });
         self
     }
     
-    pub fn pipe_config(mut self, config: StageConfig) -> Self {
+    pub fn pipe_config(mut self, config: StageConfig<T>) -> Self {
         self.stages.push(config);
         self
     }
 
     pub fn identity(mut self, name: impl Into<String>, vector_dim: usize, batch_size: usize) -> Self {
-        self.stages.push(StageConfig::Standard(Stage::identity(name, vector_dim, batch_size)));
+        self.stages.push(StageConfig::Standard { stage: Stage::identity(name, vector_dim, batch_size), tag: None });
         self
     }
 
@@ -136,14 +141,14 @@ impl PipelineBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<Pipeline> {
+    pub async fn build(self) -> Result<Pipeline<T>> {
         Pipeline::build_from_configs_with_context(self.stages, self.context).await
     }
 }
 
 /// The built pipeline.
 #[derive(Debug)]
-pub struct Pipeline {
+pub struct Pipeline<T> {
     context: Arc<ComputeContext>,
     bind_group_layout: Arc<wgpu::BindGroupLayout>,
     vector_dim: usize,
@@ -164,19 +169,22 @@ pub struct Pipeline {
     /// Stage names
     stage_names: Vec<String>,
     /// Stage configurations (standard or custom)
-    stage_configs: Vec<StageConfig>,
+    stage_configs: Vec<StageConfig<T>>,
     /// Side input buffers managed by the pipeline
     /// Maps from name to buffer
     side_inputs: HashMap<String, Arc<wgpu::Buffer>>,
+    /// The tag from the last tick() call's input
+    /// When this is None, it means no tick() has been called yet
+    last_output_tag: Option<T>,
 }
 
-impl Pipeline {
-    pub fn new() -> PipelineBuilder {
+impl<T: Clone> Pipeline<T> {
+    pub fn new() -> PipelineBuilder<T> {
         PipelineBuilder::new()
     }
 
     async fn build_from_configs_with_context(
-        mut stage_configs: Vec<StageConfig>,
+        mut stage_configs: Vec<StageConfig<T>>,
         user_context: Option<Arc<ComputeContext>>,
     ) -> Result<Self> {
         if stage_configs.is_empty() {
@@ -249,7 +257,7 @@ impl Pipeline {
         
         // Initialize custom stages in place (we take ownership of stage_configs)
         for stage_config in &mut stage_configs {
-            if let StageConfig::Custom(stage) = stage_config {
+            if let StageConfig::Custom { stage, .. } = stage_config {
                 if stage.requires_initialization() {
                     stage.initialize(&context)?;
                 }
@@ -259,7 +267,7 @@ impl Pipeline {
         for stage_config in &stage_configs {
             let name = stage_config.name().to_string();
             let bgl = match stage_config {
-                StageConfig::Standard(stage) => {
+                StageConfig::Standard { stage, .. } => {
                     // Use custom bind group layout if provided, otherwise use default
                     if let Some(ref entries) = stage.bind_group_entries {
                         Arc::new(context.create_bind_group_layout(
@@ -270,7 +278,7 @@ impl Pipeline {
                         Arc::clone(&default_bind_group_layout)
                     }
                 }
-                StageConfig::Custom(_) => {
+                StageConfig::Custom { .. } => {
                     // Custom stages don't need bind group layouts from us
                     // They create their own during encode()
                     Arc::clone(&default_bind_group_layout)
@@ -278,14 +286,14 @@ impl Pipeline {
             };
             
             let pipeline = match stage_config {
-                StageConfig::Standard(stage) => {
+                StageConfig::Standard { stage, .. } => {
                     Some(Arc::new(context.create_compute_pipeline(
                         Some(&format!("Stage {} Pipeline", name)),
                         &stage.wgsl,
                         &[&*bgl],
                     )?))
                 }
-                StageConfig::Custom(_) => {
+                StageConfig::Custom { .. } => {
                     // Custom stages don't use compute pipelines
                     None
                 }
@@ -311,6 +319,7 @@ impl Pipeline {
             stage_names,
             stage_configs,
             side_inputs: std::collections::HashMap::new(),
+            last_output_tag: None,
         };
 
         Ok(pipeline)
@@ -399,18 +408,32 @@ impl Pipeline {
         )
     }
 
-    pub async fn tick(&mut self) -> Result<()> {
+    pub async fn tick(&mut self, tag: T) -> Result<Option<T>> {
         let mut encoder = self.context.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor {
                 label: Some(&format!("Tick {} Encoder", self.tick_count)),
             },
         );
 
+        // Process tag flow through pipeline
+        // Insert tag into first stage, get its previous tag
+        // Then forward that tag to next stage, and so on
+        // This shifts tags forward through the pipeline
+        let input_tag = tag.clone();
+        let mut current_tag: Option<T> = Some(tag);
+        for i in 0..self.stage_configs.len() {
+            current_tag = self.stage_configs[i].forward_tag(current_tag);
+        }
+        // current_tag now contains what was in the last stage before this tick
+
+        // Store the input tag to indicate that data has been processed
+        self.last_output_tag = Some(input_tag);
+
         for i in 0..self.stage_configs.len() {
             let state = self.current_output_indices[i];
             
             match &self.stage_configs[i] {
-                StageConfig::Standard(_) => {
+                StageConfig::Standard { .. } => {
                     // Standard stage: use compute pipeline and bind groups
                     if let Some(compute_pipeline) = &self.compute_pipelines[i] {
                         // Lazy initialization of bind groups for standard stages
@@ -435,7 +458,7 @@ impl Pipeline {
                         pass.dispatch_workgroups(dispatch_count, 1, 1);
                     }
                 }
-                StageConfig::Custom(stage) => {
+                StageConfig::Custom { stage, .. } => {
                     // Custom stage: call its encode method
                     let input_buffer_idx = if i == 0 {
                         0
@@ -461,12 +484,12 @@ impl Pipeline {
         self.context.device_poll()?;
         self.tick_count += 1;
 
-        Ok(())
+        Ok(current_tag)
     }
 
-    pub async fn write_input<T: Pod>(&self, data: &[T]) -> Result<()> {
+    pub async fn write_input<D: Pod>(&self, data: &[D]) -> Result<()> {
         let expected_byte_size = self.batch_size * self.vector_dim * F32_SIZE;
-        let actual_byte_size = data.len() * std::mem::size_of::<T>();
+        let actual_byte_size = data.len() * std::mem::size_of::<D>();
         if actual_byte_size != expected_byte_size {
             bail!(
                 "Input size mismatch: expected {} bytes (batch_size * vector_dim * {} = {} * {} * {}), got {} bytes",
@@ -480,7 +503,12 @@ impl Pipeline {
         Ok(())
     }
 
-    pub async fn read_output(&self) -> Result<Vec<f32>> {
+    pub async fn read_output(&self) -> Result<Option<(Option<T>, Vec<f32>)>> {
+        // Return None if no tick has been called yet (tag is None)
+        if self.last_output_tag.is_none() {
+            return Ok(None);
+        }
+
         let num_stages = self.compute_pipelines.len();
         if num_stages == 0 {
             bail!("Pipeline has no stages");
@@ -526,7 +554,7 @@ impl Pipeline {
         let data: &[u8] = &buffer_slice.get_mapped_range();
         let result: Vec<f32> = bytemuck::cast_slice(&data[..element_count * F32_SIZE]).to_vec();
 
-        Ok(result)
+        Ok(Some((self.last_output_tag.clone(), result)))
     }
 
     pub async fn resize(&mut self, new_batch_size: usize) -> Result<()> {

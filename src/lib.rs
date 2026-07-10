@@ -30,7 +30,7 @@
 //!     let stage3 = Stage::new("stage3", IDENTITY_SHADER, 4, 1024);
 //!
 //!     // Build the pipeline using the builder pattern
-//!     let mut pipeline = Pipeline::new()
+//!     let mut pipeline: Pipeline<u64> = Pipeline::new()
 //!         .pipe(stage1)
 //!         .pipe(stage2)
 //!         .pipe(stage3)
@@ -42,9 +42,9 @@
 //!     pipeline.write_input(&input).await?;
 //!
 //!     // Advance pipeline by 3 ticks (data propagates through 3 stages)
-//!     pipeline.tick().await?;
-//!     pipeline.tick().await?;
-//!     pipeline.tick().await?;
+//!     pipeline.tick(1u64).await?;
+//!     pipeline.tick(1u64).await?;
+//!     pipeline.tick(1u64).await?;
 //!
 //!     Ok(())
 //! }
