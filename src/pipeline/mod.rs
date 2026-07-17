@@ -408,7 +408,7 @@ impl<T: Clone> Pipeline<T> {
         )
     }
 
-    pub async fn tick(&mut self, tag: T) -> Result<Option<T>> {
+    pub async fn tick(&mut self, tag: T) -> Result<()> {
         let mut encoder = self.context.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor {
                 label: Some(&format!("Tick {} Encoder", self.tick_count)),
@@ -419,15 +419,25 @@ impl<T: Clone> Pipeline<T> {
         // Insert tag into first stage, get its previous tag
         // Then forward that tag to next stage, and so on
         // This shifts tags forward through the pipeline
-        let input_tag = tag.clone();
-        let mut current_tag: Option<T> = Some(tag);
+        let mut current_tag: Option<T> = Some(tag.clone());
         for i in 0..self.stage_configs.len() {
             current_tag = self.stage_configs[i].forward_tag(current_tag);
         }
         // current_tag now contains what was in the last stage before this tick
 
-        // Store the input tag to indicate that data has been processed
-        self.last_output_tag = Some(input_tag);
+        // Store the tag that just exited the last stage
+        // For the same tag used for all ticks, current_tag will be None for the first num_stages ticks
+        // In this case, output is ready after num_stages ticks
+        let num_stages = self.stage_configs.len() as u64;
+        let ticks_after_this = self.tick_count + 1;
+        
+        if current_tag.is_none() && ticks_after_this >= num_stages {
+            // Same tag case: output is ready after num_stages ticks
+            self.last_output_tag = Some(tag);
+        } else {
+            // Different tags case: output is ready when current_tag is Some
+            self.last_output_tag = current_tag;
+        }
 
         for i in 0..self.stage_configs.len() {
             let state = self.current_output_indices[i];
@@ -484,7 +494,7 @@ impl<T: Clone> Pipeline<T> {
         self.context.device_poll()?;
         self.tick_count += 1;
 
-        Ok(current_tag)
+        Ok(())
     }
 
     pub async fn write_input<D: Pod>(&self, data: &[D]) -> Result<()> {
