@@ -154,18 +154,25 @@ pub struct Pipeline<T> {
     vector_dim: usize,
     batch_size: usize,
     tick_count: u64,
-    /// All buffers: [input_buffer, stage0_out_a, stage0_out_b, stage1_out_a, stage1_out_b, ...]
-    /// For N stages, we need 1 input buffer + 2*N output buffers
+    /// All buffers: [input_buffer_a, input_buffer_b, stage0_out_a, stage0_out_b, stage1_out_a, stage1_out_b, ...]
+    /// For N stages, we need 2 input buffers + 2*N output buffers
     buffers: Vec<Arc<wgpu::Buffer>>,
     /// Compute pipelines for each stage (only for standard stages)
     compute_pipelines: Vec<Option<Arc<wgpu::ComputePipeline>>>,
     /// Bind group layouts for each stage (can be different per stage)
     bind_group_layouts: Vec<Arc<wgpu::BindGroupLayout>>,
-    /// Pre-created bind groups for each stage (2 for each stage for ping-pong)
+    /// Pre-created bind groups for each stage
+    /// For stage 0: 2 input buffers × 2 output buffers = 4 bind groups
+    /// For other stages: 2 input buffers (from prev stage) × 2 output buffers = 4 bind groups
+    /// But we store them as [[wgpu::BindGroup; 2]; 2] where:
+    /// - First index: input buffer index (0 or 1)
+    /// - Second index: output buffer state (0 or 1)
     /// Only used for standard stages; custom stages create their own bind groups
-    bind_groups: Vec<Option<[wgpu::BindGroup; 2]>>,
+    bind_groups: Vec<Option<[[wgpu::BindGroup; 2]; 2]>>,
     /// Current output buffer index for each stage (0 or 1 in its pair)
     current_output_indices: Vec<usize>,
+    /// Current input buffer index to write to (0 or 1) for ping-pong input
+    current_input_write_index: usize,
     /// Stage names
     stage_names: Vec<String>,
     /// Stage configurations (standard or custom)
@@ -232,13 +239,18 @@ impl<T: Clone> Pipeline<T> {
         let buffer_size = batch_size as u64 * element_size as u64;
         let usages = stage_buffer_usages();
 
-        // Create all buffers: input buffer + 2 output buffers per stage
-        let num_buffers = 1 + 2 * stage_configs.len();
+        // Create all buffers: 2 input buffers + 2 output buffers per stage
+        let num_buffers = 2 + 2 * stage_configs.len();
         let mut buffers = Vec::with_capacity(num_buffers);
         
-        // Input buffer for stage 0
+        // Input buffers for stage 0 (ping-pong pair)
         buffers.push(Arc::new(context.create_buffer(
-            Some("Pipeline Input Buffer"),
+            Some("Pipeline Input Buffer A"),
+            buffer_size,
+            usages,
+        )));
+        buffers.push(Arc::new(context.create_buffer(
+            Some("Pipeline Input Buffer B"),
             buffer_size,
             usages,
         )));
@@ -323,8 +335,9 @@ impl<T: Clone> Pipeline<T> {
             buffers,
             compute_pipelines,
             bind_group_layouts,
-            bind_groups: vec![None; stage_configs.len()], // Will be initialized lazily
+            bind_groups: vec![None; stage_configs.len()], // Will be initialized lazily as 2x2 arrays
             current_output_indices: vec![0; stage_configs.len()],
+            current_input_write_index: 0,
             stage_names,
             stage_configs,
             side_inputs: std::collections::HashMap::new(),
@@ -343,18 +356,17 @@ impl<T: Clone> Pipeline<T> {
     /// was writing to in the PREVIOUS tick.
     ///
     /// This is used for standard stages during pipeline creation.
-    fn create_bind_group_for_stage(&self, stage_idx: usize, state: usize) -> wgpu::BindGroup {
+    fn create_bind_group_for_stage(&self, stage_idx: usize, input_buffer_variant: usize, output_state: usize) -> wgpu::BindGroup {
         let bgl = &self.bind_group_layouts[stage_idx];
         let input_buffer_idx = if stage_idx == 0 {
-            0
+            // Stage 0: input_buffer_variant selects between the 2 input buffers
+            input_buffer_variant
         } else {
-            // If state is 0, current_output_indices[stage_idx-1] would be 0.
-            // Staggering means we read from 1 - 0 = 1.
-            // If state is 1, current_output_indices[stage_idx-1] would be 1.
-            // Staggering means we read from 1 - 1 = 0.
-            1 + 2 * (stage_idx - 1) + (1 - state)
+            // For stage i > 0: input comes from previous stage's output
+            // input_buffer_variant is used to select between the 2 output buffers of the previous stage
+            2 + 2 * (stage_idx - 1) + input_buffer_variant
         };
-        let output_buffer_idx = 1 + 2 * stage_idx + state;
+        let output_buffer_idx = 2 + 2 * stage_idx + output_state;
 
         // Check how many bindings this stage's layout has
         // If it has 3 bindings (like multiply stage), we need to provide 3 entries
@@ -413,7 +425,7 @@ impl<T: Clone> Pipeline<T> {
         };
 
         self.context.create_bind_group(
-            Some(&format!("Stage {} BG State {}", self.stage_names[stage_idx], state)),
+            Some(&format!("Stage {} BG Input {} Output {}", self.stage_names[stage_idx], input_buffer_variant, output_state)),
             bgl,
             &entries,
         )
@@ -455,26 +467,31 @@ impl<T: Clone> Pipeline<T> {
             
             // Calculate input buffer index for this stage
             let input_buffer_idx = if i == 0 {
-                0 // Input buffer for first stage
+                // Stage 0 reads from the input buffer that has data.
+                // current_input_write_index points to the buffer to write to NEXT.
+                // So the buffer with data is 1 - current_input_write_index.
+                1 - self.current_input_write_index
             } else {
                 // Staggering: read from previous stage's OTHER buffer
                 // At the start of tick, state = the buffer index stage i will write to in THIS tick
                 // In the previous tick, all stages had state = 1 - state (because we flip all at end of tick)
-                // So stage i-1 wrote to buffer 1 + 2*(i-1) + (1 - state) in the previous tick
-                1 + 2 * (i - 1) + (1 - state)
+                // So stage i-1 wrote to buffer 2 + 2*(i-1) + (1 - state) in the previous tick
+                // (2 instead of 1 because we now have 2 input buffers)
+                2 + 2 * (i - 1) + (1 - state)
             };
             
-            let output_buffer_idx = 1 + 2 * i + state;
+            let output_buffer_idx = 2 + 2 * i + state;
             
             // Get the submission metadata from the input buffer and propagate to stage
-            // If no metadata is available, skip processing for this stage
+            // If no metadata is available, use default values
             let metadata = self.buffer_submission_metadata[input_buffer_idx];
             let (actual_elements, n) = match metadata {
                 Some((actual_elements, n, _batch_size)) => (actual_elements, n),
                 None => {
-                    // No metadata for this buffer, skip processing this stage
+                    // No metadata for this buffer, use default values
                     // This happens when the pipeline hasn't been filled yet or data hasn't reached this stage
-                    continue;
+                    // Use the pipeline's default values
+                    (self.batch_size, self.default_n)
                 }
             };
             
@@ -487,13 +504,26 @@ impl<T: Clone> Pipeline<T> {
                     // Standard stage: use compute pipeline and bind groups
                     if let Some(compute_pipeline) = &self.compute_pipelines[i] {
                         // Lazy initialization of bind groups for standard stages
+                        // We need 4 bind groups: 2 input variants × 2 output states
                         if self.bind_groups[i].is_none() {
-                            let bg0 = self.create_bind_group_for_stage(i, 0);
-                            let bg1 = self.create_bind_group_for_stage(i, 1);
-                            self.bind_groups[i] = Some([bg0, bg1]);
+                            let bgs = [[self.create_bind_group_for_stage(i, 0, 0), self.create_bind_group_for_stage(i, 0, 1)],
+                                       [self.create_bind_group_for_stage(i, 1, 0), self.create_bind_group_for_stage(i, 1, 1)]];
+                            self.bind_groups[i] = Some(bgs);
                         }
                         
-                        let bind_group = &self.bind_groups[i].as_ref().unwrap()[state];
+                        // Select the appropriate bind group based on input buffer variant and output state
+                        let (input_buffer_variant, output_state) = if i == 0 {
+                            // For stage 0, input_buffer_variant is determined by current_input_write_index
+                            // The buffer with data is 1 - current_input_write_index
+                            (1 - self.current_input_write_index, state)
+                        } else {
+                            // For other stages, input_buffer_variant is determined by staggering
+                            // At the start of tick, state = the buffer index this stage will write to
+                            // In the previous tick, the previous stage had state = 1 - state
+                            // So the previous stage wrote to buffer (1 - state)
+                            (1 - state, state)
+                        };
+                        let bind_group = &self.bind_groups[i].as_ref().unwrap()[input_buffer_variant][output_state];
 
                         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                             label: Some(&format!("Stage {} Pass Tick {}", self.stage_names[i], self.tick_count)),
@@ -511,9 +541,9 @@ impl<T: Clone> Pipeline<T> {
                 StageConfig::Custom { stage, .. } => {
                     // Custom stage: call its encode method
                     let input_buffer_idx = if i == 0 {
-                        0
+                        1 - self.current_input_write_index
                     } else {
-                        1 + 2 * (i - 1) + (1 - state)
+                        2 + 2 * (i - 1) + (1 - state)
                     };
                     let input_buffer = &self.buffers[input_buffer_idx];
                     let output_buffer = &self.buffers[output_buffer_idx];
@@ -546,16 +576,18 @@ impl<T: Clone> Pipeline<T> {
         self.default_n = n;
     }
     
-    /// Sets the submission metadata for the input buffer.
+    /// Sets the submission metadata for the next input buffer to be written.
     /// This allows tracking submission sizes through the pipeline without padding.
-    /// The metadata will be propagated through the pipeline as data flows through stages.
+    /// The metadata will be set for the buffer that will be written to by the next write_input() call.
     /// 
     /// # Arguments
     /// * `actual_total_elements` - Total number of Complex elements in the submission
     /// * `n` - FFT size for this submission
     /// * `batch_size` - Batch size for this submission
     pub fn set_input_submission_metadata(&mut self, actual_total_elements: usize, n: usize, batch_size: usize) {
-        self.buffer_submission_metadata[0] = Some((actual_total_elements, n, batch_size));
+        // Set metadata for the buffer that will be written to next
+        // (current_input_write_index points to the next buffer to write to)
+        self.buffer_submission_metadata[self.current_input_write_index] = Some((actual_total_elements, n, batch_size));
     }
     
     /// Clears all buffer metadata.
@@ -566,7 +598,7 @@ impl<T: Clone> Pipeline<T> {
         }
     }
 
-    pub async fn write_input<D: Pod>(&self, data: &[D]) -> Result<()> {
+    pub async fn write_input<D: Pod>(&mut self, data: &[D]) -> Result<()> {
         let expected_byte_size = self.batch_size * self.vector_dim * F32_SIZE;
         let actual_byte_size = data.len() * std::mem::size_of::<D>();
         if actual_byte_size != expected_byte_size {
@@ -576,8 +608,12 @@ impl<T: Clone> Pipeline<T> {
             );
         }
 
-        // Write to input buffer (index 0)
-        self.context.queue.write_buffer(&self.buffers[0], 0, bytemuck::cast_slice(data));
+        // Write to the current input buffer
+        let write_idx = self.current_input_write_index;
+        self.context.queue.write_buffer(&self.buffers[write_idx], 0, bytemuck::cast_slice(data));
+        
+        // Toggle write index for next submission
+        self.current_input_write_index = 1 - write_idx;
 
         Ok(())
     }
@@ -594,10 +630,11 @@ impl<T: Clone> Pipeline<T> {
         }
 
         // Output is in the last stage's current output buffer
-        // Buffer index = 1 + 2*(num_stages-1) + (1 - current_output_indices[num_stages-1])
+        // Buffer index = 2 + 2*(num_stages-1) + (1 - current_output_indices[num_stages-1])
         // Because we flipped after dispatch, the current_output_indices points to the NEXT buffer to write to
         // So the last written buffer is 1 - current_output_indices[num_stages-1]
-        let last_output_buffer_idx = 1 + 2 * (num_stages - 1) + (1 - self.current_output_indices[num_stages - 1]);
+        // Note: We now have 2 input buffers, so stage outputs start at index 2
+        let last_output_buffer_idx = 2 + 2 * (num_stages - 1) + (1 - self.current_output_indices[num_stages - 1]);
         let read_buffer = &self.buffers[last_output_buffer_idx];
         let buffer_size = self.batch_size as u64 * self.vector_dim as u64 * F32_SIZE as u64;
         let element_count = buffer_size as usize / F32_SIZE;
@@ -872,6 +909,7 @@ impl<T: Clone> Pipeline<T> {
     }
 
     pub fn get_input_buffer(&self) -> &wgpu::Buffer {
+        // Return the first input buffer (buffer 0) for backward compatibility
         &self.buffers[0]
     }
     
