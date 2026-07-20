@@ -176,6 +176,14 @@ pub struct Pipeline<T> {
     /// The tag from the last tick() call's input
     /// When this is None, it means no tick() has been called yet
     last_output_tag: Option<T>,
+    /// Per-buffer metadata: for each buffer, store submission metadata
+    /// This allows tracking submission sizes through the pipeline without padding
+    /// Index corresponds to buffer index in the buffers vec
+    /// Stores (actual_total_elements, n, batch_size) for the submission in that buffer
+    buffer_submission_metadata: Vec<Option<(usize, usize, usize)>>,
+    /// Default n value to use when no metadata is available for a buffer
+    /// This is set when the pipeline is created or resized
+    default_n: usize,
 }
 
 impl<T: Clone> Pipeline<T> {
@@ -305,6 +313,7 @@ impl<T: Clone> Pipeline<T> {
             stage_names.push(name);
         }
 
+        let num_buffers = buffers.len();
         let pipeline = Self {
             context,
             bind_group_layout: Arc::clone(&default_bind_group_layout),
@@ -320,6 +329,8 @@ impl<T: Clone> Pipeline<T> {
             stage_configs,
             side_inputs: std::collections::HashMap::new(),
             last_output_tag: None,
+            buffer_submission_metadata: vec![None; num_buffers],
+            default_n: batch_size, // Use batch_size as initial default_n
         };
 
         Ok(pipeline)
@@ -442,6 +453,35 @@ impl<T: Clone> Pipeline<T> {
         for i in 0..self.stage_configs.len() {
             let state = self.current_output_indices[i];
             
+            // Calculate input buffer index for this stage
+            let input_buffer_idx = if i == 0 {
+                0 // Input buffer for first stage
+            } else {
+                // Staggering: read from previous stage's OTHER buffer
+                // At the start of tick, state = the buffer index stage i will write to in THIS tick
+                // In the previous tick, all stages had state = 1 - state (because we flip all at end of tick)
+                // So stage i-1 wrote to buffer 1 + 2*(i-1) + (1 - state) in the previous tick
+                1 + 2 * (i - 1) + (1 - state)
+            };
+            
+            let output_buffer_idx = 1 + 2 * i + state;
+            
+            // Get the submission metadata from the input buffer and propagate to stage
+            // If no metadata is available, skip processing for this stage
+            let metadata = self.buffer_submission_metadata[input_buffer_idx];
+            let (actual_elements, n) = match metadata {
+                Some((actual_elements, n, _batch_size)) => (actual_elements, n),
+                None => {
+                    // No metadata for this buffer, skip processing this stage
+                    // This happens when the pipeline hasn't been filled yet or data hasn't reached this stage
+                    continue;
+                }
+            };
+            
+            // Update the stage with the actual elements and n from its input submission
+            self.stage_configs[i].update_actual_total_elements(actual_elements)?;
+            self.stage_configs[i].update_n(n)?;
+            
             match &self.stage_configs[i] {
                 StageConfig::Standard { .. } => {
                     // Standard stage: use compute pipeline and bind groups
@@ -475,14 +515,17 @@ impl<T: Clone> Pipeline<T> {
                     } else {
                         1 + 2 * (i - 1) + (1 - state)
                     };
-                    let output_buffer_idx = 1 + 2 * i + state;
-                    
                     let input_buffer = &self.buffers[input_buffer_idx];
                     let output_buffer = &self.buffers[output_buffer_idx];
                     
-                    stage.encode(&mut encoder, input_buffer, output_buffer, &self.side_inputs)?;
+                    stage.encode(&mut encoder, input_buffer, output_buffer, &self.side_inputs)?
                 }
             }
+            
+            // Propagate submission metadata to output buffer
+            // The output buffer is being written with data from the input buffer in this tick,
+            // so it should have the same metadata as the input buffer
+            self.buffer_submission_metadata[output_buffer_idx] = self.buffer_submission_metadata[input_buffer_idx];
         }
 
         // Flip all output indices
@@ -495,6 +538,32 @@ impl<T: Clone> Pipeline<T> {
         self.tick_count += 1;
 
         Ok(())
+    }
+
+    /// Sets the default n value for the pipeline.
+    /// This is used as a fallback when no metadata is available for a buffer.
+    pub fn set_default_n(&mut self, n: usize) {
+        self.default_n = n;
+    }
+    
+    /// Sets the submission metadata for the input buffer.
+    /// This allows tracking submission sizes through the pipeline without padding.
+    /// The metadata will be propagated through the pipeline as data flows through stages.
+    /// 
+    /// # Arguments
+    /// * `actual_total_elements` - Total number of Complex elements in the submission
+    /// * `n` - FFT size for this submission
+    /// * `batch_size` - Batch size for this submission
+    pub fn set_input_submission_metadata(&mut self, actual_total_elements: usize, n: usize, batch_size: usize) {
+        self.buffer_submission_metadata[0] = Some((actual_total_elements, n, batch_size));
+    }
+    
+    /// Clears all buffer metadata.
+    /// This should be called when the pipeline is idle to avoid interference with new submissions.
+    pub fn clear_all_buffer_metadata(&mut self) {
+        for metadata in &mut self.buffer_submission_metadata {
+            *metadata = None;
+        }
     }
 
     pub async fn write_input<D: Pod>(&self, data: &[D]) -> Result<()> {
@@ -532,8 +601,6 @@ impl<T: Clone> Pipeline<T> {
         let read_buffer = &self.buffers[last_output_buffer_idx];
         let buffer_size = self.batch_size as u64 * self.vector_dim as u64 * F32_SIZE as u64;
         let element_count = buffer_size as usize / F32_SIZE;
-        eprintln!("PIPELINE DEBUG: batch_size={}, vector_dim={}, buffer_size={}, element_count={}", 
-            self.batch_size, self.vector_dim, buffer_size, element_count);
 
         let readback_buffer = self.context.create_buffer(
             Some("Output Readback"),
@@ -615,6 +682,11 @@ impl<T: Clone> Pipeline<T> {
             if self.bind_groups[i].is_some() {
                 self.bind_groups[i] = None;
             }
+        }
+        
+        // Clear buffer metadata since buffer contents have been resized
+        for metadata in &mut self.buffer_submission_metadata {
+            *metadata = None;
         }
 
         Ok(())
@@ -700,6 +772,11 @@ impl<T: Clone> Pipeline<T> {
                 // but since StageConfig::Custom uses Box<dyn PipelineStage>,
                 // we can't easily get mutable access here without significant refactoring
             }
+        }
+        
+        // Clear buffer metadata since buffer contents have been resized
+        for metadata in &mut self.buffer_submission_metadata {
+            *metadata = None;
         }
 
         Ok(())

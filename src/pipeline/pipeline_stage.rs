@@ -150,6 +150,20 @@ pub trait PipelineStage: Debug {
     fn update_n(&mut self, _new_n: usize) -> Result<()> {
         Ok(())
     }
+    
+    /// Updates the actual data size parameter for stages that need it.
+    ///
+    /// This is called to track the actual number of elements in a submission,
+    /// which may be smaller than the pipeline's buffer size.
+    ///
+    /// # Arguments
+    /// * `total_elements` - The actual number of elements (Complex values) in the submission
+    ///
+    /// # Returns
+    /// A Result indicating success or failure. Default implementation does nothing.
+    fn update_actual_total_elements(&mut self, _total_elements: usize) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Enum representing either a standard Stage or a custom PipelineStage.
@@ -275,6 +289,19 @@ impl<T> StageConfig<T> {
             }
             StageConfig::Custom { stage, .. } => {
                 stage.update_n(new_n)
+            }
+        }
+    }
+    
+    /// Updates the actual total elements for all stages.
+    pub fn update_actual_total_elements(&mut self, total_elements: usize) -> Result<()> {
+        match self {
+            StageConfig::Standard { .. } => {
+                // Standard stages don't have this parameter
+                Ok(())
+            }
+            StageConfig::Custom { stage, .. } => {
+                stage.update_actual_total_elements(total_elements)
             }
         }
     }
