@@ -794,6 +794,10 @@ impl<T: Clone> Pipeline<T> {
         self.batch_size
     }
 
+    pub fn get_input_buffer(&self) -> &wgpu::Buffer {
+        &self.buffers[0]
+    }
+    
     pub fn tick_count(&self) -> u64 {
         self.tick_count
     }
