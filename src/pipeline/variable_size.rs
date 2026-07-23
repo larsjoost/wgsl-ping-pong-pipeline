@@ -758,6 +758,7 @@ fn create_bind_group_layout(context: &ComputeContext) -> wgpu::BindGroupLayout {
 mod tests {
     use super::*;
     use pollster::block_on;
+    use wgpu::CommandEncoder;
 
     const DOUBLE_WGSL: &str = r#"
     @group(0) @binding(0)
