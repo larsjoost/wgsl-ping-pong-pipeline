@@ -78,7 +78,7 @@ mod tests {
         let stage = Stage::new("test_stage", "@compute @workgroup_size(1) fn main() {}", 2, 1024);
         
         // Create StageConfig with a tag
-        let mut config = StageConfig::<TestTag>::Standard {
+        let config = StageConfig::<TestTag>::Standard {
             stage,
             tag: Some(TestTag::new(1)),
         };

@@ -462,8 +462,8 @@ impl<T: Clone> Pipeline<T> {
                 // Stage 0 reads from the input buffer that has data
                 1 - self.current_input_write_index
             } else {
-                // Read from the buffer that the previous stage is writing to in THIS tick
-                2 + 2 * (i - 1) + self.current_output_indices[i - 1]
+                // Read from the buffer that the previous stage wrote to in the PREVIOUS tick
+                2 + 2 * (i - 1) + (1 - self.current_output_indices[i - 1])
             };
             
             let output_buffer_idx = 2 + 2 * i + state;
@@ -520,7 +520,7 @@ impl<T: Clone> Pipeline<T> {
                         pass.set_bind_group(0, bind_group, &[]);
 
                         let workgroup_size = 64u32;
-                        let dispatch_count = (self.batch_size as u32 + workgroup_size - 1) / workgroup_size;
+                        let dispatch_count = (actual_elements as u32 + workgroup_size - 1) / workgroup_size;
                         pass.dispatch_workgroups(dispatch_count, 1, 1);
                     }
                 }
@@ -581,19 +581,36 @@ impl<T: Clone> Pipeline<T> {
     }
 
     pub async fn write_input<D: Pod>(&mut self, data: &[D]) -> Result<()> {
-        let expected_byte_size = self.batch_size * self.vector_dim * F32_SIZE;
         let actual_byte_size = data.len() * std::mem::size_of::<D>();
-        if actual_byte_size != expected_byte_size {
+        if actual_byte_size == 0 {
+            bail!("Input data cannot be empty");
+        }
+
+        let element_size = self.vector_dim * F32_SIZE;
+        if actual_byte_size % element_size != 0 {
             bail!(
-                "Input size mismatch: expected {} bytes (batch_size * vector_dim * {} = {} * {} * {}), got {} bytes",
-                expected_byte_size, F32_SIZE, self.batch_size, self.vector_dim, F32_SIZE, actual_byte_size
+                "Input byte size {} is not a multiple of element size {} (vector_dim {} * F32_SIZE {})",
+                actual_byte_size, element_size, self.vector_dim, F32_SIZE
             );
         }
 
-        // Write to the current input buffer
+        let actual_batch_size = actual_byte_size / element_size;
         let write_idx = self.current_input_write_index;
+
+        if actual_byte_size as u64 > self.buffers[write_idx].size() {
+            let new_batch_size = std::cmp::max(actual_batch_size, self.batch_size);
+            self.resize(new_batch_size).await?;
+        }
+
+        // Write to the current input buffer
         self.context.queue.write_buffer(&self.buffers[write_idx], 0, bytemuck::cast_slice(data));
         
+        let custom_n = match self.buffer_submission_metadata[write_idx] {
+            Some((_, custom_n, _)) => custom_n,
+            None => self.default_n,
+        };
+        self.buffer_submission_metadata[write_idx] = Some((actual_batch_size, custom_n, actual_batch_size));
+
         // Toggle write index for next submission
         self.current_input_write_index = 1 - write_idx;
 
@@ -618,7 +635,15 @@ impl<T: Clone> Pipeline<T> {
         // Note: We now have 2 input buffers, so stage outputs start at index 2
         let last_output_buffer_idx = 2 + 2 * (num_stages - 1) + (1 - self.current_output_indices[num_stages - 1]);
         let read_buffer = &self.buffers[last_output_buffer_idx];
-        let buffer_size = self.batch_size as u64 * self.vector_dim as u64 * F32_SIZE as u64;
+
+        let element_count = match self.buffer_submission_metadata[last_output_buffer_idx] {
+            Some((actual_elements, _n, _batch_size)) => actual_elements * self.vector_dim,
+            None => self.batch_size * self.vector_dim,
+        };
+        let buffer_size = std::cmp::min(
+            (element_count * F32_SIZE) as u64,
+            read_buffer.size(),
+        );
         let element_count = buffer_size as usize / F32_SIZE;
 
         let readback_buffer = self.context.create_buffer(
@@ -702,10 +727,12 @@ impl<T: Clone> Pipeline<T> {
                 self.bind_groups[i] = None;
             }
         }
-        
-        // Clear buffer metadata since buffer contents have been resized
-        for metadata in &mut self.buffer_submission_metadata {
-            *metadata = None;
+
+        // Notify custom stages of the size change if they support dynamic resizing
+        for stage_config in &mut self.stage_configs {
+            if stage_config.supports_dynamic_resizing() {
+                let _ = stage_config.resize(new_batch_size, self.vector_dim);
+            }
         }
 
         Ok(())

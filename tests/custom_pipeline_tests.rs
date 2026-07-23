@@ -987,4 +987,55 @@ async fn test_selective_resize_one_buffer_only() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Test: Changing write data size during operation with Custom stages.
+/// Sequence: write data with one size -> tick -> write data with another size -> tick -> read first data -> tick -> read second data
+#[pollster::test]
+async fn test_custom_stage_change_write_data_size_during_operation() -> anyhow::Result<()> {
+    let stage1 = WgslCustomStage::new("custom_stage1", DOUBLE_WGSL, 2, 4);
+    let stage2 = WgslCustomStage::new("custom_stage2", DOUBLE_WGSL, 2, 4);
+    
+    let mut pipeline: Pipeline<u64> = Pipeline::new()
+        .pipe_custom(Box::new(stage1))
+        .pipe_custom(Box::new(stage2))
+        .build()
+        .await?;
+
+    assert_eq!(pipeline.num_stages(), 2);
+
+    // 1. Write data with first size (4 floats = 2 vectors of 2D)
+    let input1: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+    pipeline.write_input(&input1).await?;
+
+    // 2. Tick
+    pipeline.tick(1u64).await?;
+
+    // 3. Write data with another size (12 floats = 6 vectors of 2D)
+    let input2: Vec<f32> = vec![
+        10.0, 20.0, 30.0, 40.0, 50.0, 60.0,
+        70.0, 80.0, 90.0, 100.0, 110.0, 120.0,
+    ];
+    pipeline.write_input(&input2).await?;
+
+    // 4. Tick
+    pipeline.tick(2u64).await?;
+
+    // 5. Read first data: [1,2,3,4] -> stage1: [2,4,6,8] -> stage2: [4,8,12,16]
+    let Some((_tag, output1)) = pipeline.read_output().await? else {
+        panic!("First output should be ready");
+    };
+    assert_eq!(output1, vec![4.0, 8.0, 12.0, 16.0]);
+
+    // 6. Tick
+    pipeline.tick(3u64).await?;
+
+    // 7. Read second data: [10,20,...,120] -> double twice -> [40,80,...,480]
+    let Some((_tag, output2)) = pipeline.read_output().await? else {
+        panic!("Second output should be ready");
+    };
+    let expected2: Vec<f32> = input2.iter().map(|x| x * 4.0).collect();
+    assert_eq!(output2, expected2);
+
+    Ok(())
+}
+
 

@@ -225,6 +225,19 @@ impl<T: Clone> VariableSizePipeline<T> {
             self.bind_groups[i] = None;
         }
 
+        // Notify custom stage of size change if it supports dynamic resizing
+        if stage_idx > 0 {
+            let vector_dim = self.stage_configs[stage_idx - 1].vector_dim;
+            if self.stage_configs[stage_idx - 1].config.supports_dynamic_resizing() {
+                let _ = self.stage_configs[stage_idx - 1].config.resize(new_batch_size, vector_dim);
+            }
+        } else if !self.stage_configs.is_empty() {
+            let vector_dim = self.stage_configs[0].vector_dim;
+            if self.stage_configs[0].config.supports_dynamic_resizing() {
+                let _ = self.stage_configs[0].config.resize(new_batch_size, vector_dim);
+            }
+        }
+
         Ok(())
     }
 
@@ -328,19 +341,36 @@ impl<T: Clone> VariableSizePipeline<T> {
 
     /// Writes input data for the current write buffer
     pub async fn write_input<D: bytemuck::Pod>(&mut self, data: &[D]) -> Result<()> {
-        let stage_0_config = &self.stage_configs[0];
-        let expected_byte_size = stage_0_config.buffer_size() as usize;
         let actual_byte_size = data.len() * std::mem::size_of::<D>();
 
-        if actual_byte_size > expected_byte_size {
+        if actual_byte_size == 0 {
+            bail!("Input data cannot be empty");
+        }
+
+        let stage_0_config = &self.stage_configs[0];
+        let element_size = stage_0_config.element_size();
+        if actual_byte_size % element_size != 0 {
             bail!(
-                "Input size {} bytes exceeds stage 0 buffer size {} bytes",
-                actual_byte_size, expected_byte_size
+                "Input byte size {} is not a multiple of element size {}",
+                actual_byte_size, element_size
             );
         }
 
+        let actual_batch_size = actual_byte_size / element_size;
         let write_idx = self.current_input_write_index;
+
+        if actual_byte_size as u64 > self.buffers[write_idx].size() {
+            self.resize_stage(0, actual_batch_size).await?;
+        }
+
         self.context.queue.write_buffer(&self.buffers[write_idx], 0, bytemuck::cast_slice(data));
+
+        let custom_n = match self.buffer_submission_metadata[write_idx] {
+            Some((_, custom_n, _)) => custom_n,
+            None => self.default_n,
+        };
+        self.buffer_submission_metadata[write_idx] = Some((actual_batch_size, custom_n, actual_batch_size));
+
         self.current_input_write_index = 1 - write_idx;
 
         Ok(())
@@ -491,8 +521,15 @@ impl<T: Clone> VariableSizePipeline<T> {
         let last_output_buffer_idx = 2 + 2 * last_stage_idx + (1 - self.current_output_indices[last_stage_idx]);
         let read_buffer = &self.buffers[last_output_buffer_idx];
 
-        // Use actual buffer size, not config size, since buffers may have been selectively resized
-        let buffer_size = read_buffer.size();
+        let last_stage_vector_dim = self.stage_configs[last_stage_idx].vector_dim;
+        let element_count = match self.buffer_submission_metadata[last_output_buffer_idx] {
+            Some((actual_elements, _n, _batch_size)) => actual_elements * last_stage_vector_dim,
+            None => (read_buffer.size() as usize) / F32_SIZE,
+        };
+        let buffer_size = std::cmp::min(
+            (element_count * F32_SIZE) as u64,
+            read_buffer.size(),
+        );
         let element_count = buffer_size as usize / F32_SIZE;
 
         let readback_buffer = self.context.create_buffer(
