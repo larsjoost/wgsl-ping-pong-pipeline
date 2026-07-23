@@ -298,6 +298,19 @@ impl PipelineStage for WgslCustomStage {
     fn requires_initialization(&self) -> bool {
         true
     }
+
+    fn supports_dynamic_resizing(&self) -> bool {
+        true
+    }
+
+    fn resize(&mut self, new_batch_size: usize, new_vector_dim: usize) -> Result<()> {
+        self.batch_size = new_batch_size;
+        self.vector_dim = new_vector_dim;
+        // Recreate GPU resources with new dimensions
+        // For this simple test, we just update the sizes
+        // In a real implementation, we'd recreate pipelines, bind group layouts, etc.
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -772,6 +785,79 @@ async fn test_two_custom_stages_with_varying_metadata() -> anyhow::Result<()> {
     // [100,200,300,400,0,0,0,0] -> stage1: [200,400,600,800,0,0,0,0] -> stage2: [400,800,1200,1600,0,0,0,0]
     assert_eq!(output3[0..4], vec![400.0, 800.0, 1200.0, 1600.0]);
     assert_eq!(output3[4..8], vec![0.0; 4]);
+    
+    Ok(())
+}
+
+/// Test: Two custom stages with dynamic buffer growth
+/// This test demonstrates that the pipeline can dynamically resize its buffers
+/// when the data size increases beyond the initial buffer capacity.
+#[pollster::test]
+async fn test_two_custom_stages_dynamic_buffer_growth() -> anyhow::Result<()> {
+    let initial_batch_size = 4;
+    let vector_dim = 1;
+    
+    // Create two custom double stages
+    let stage1 = WgslCustomStage::new("stage1", DOUBLE_WGSL, vector_dim, initial_batch_size);
+    let stage2 = WgslCustomStage::new("stage2", DOUBLE_WGSL, vector_dim, initial_batch_size);
+    
+    let mut pipeline: Pipeline<u64> = Pipeline::new()
+        .pipe_custom(Box::new(stage1))
+        .pipe_custom(Box::new(stage2))
+        .build()
+        .await?;
+
+    assert_eq!(pipeline.num_stages(), 2);
+    assert_eq!(pipeline.batch_size(), initial_batch_size);
+
+    // First: Process with initial size (4 elements)
+    let input1: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+    pipeline.set_input_submission_metadata(4, 4, initial_batch_size);
+    pipeline.write_input(&input1).await?;
+    pipeline.tick(1u64).await?;
+    pipeline.tick(1u64).await?;
+    
+    let Some((_tag, output1)) = pipeline.read_output().await? else {
+        panic!("Output should be ready");
+    };
+    // [1,2,3,4] -> stage1: [2,4,6,8] -> stage2: [4,8,12,16]
+    assert_eq!(output1, vec![4.0, 8.0, 12.0, 16.0]);
+
+    // Now resize the pipeline to handle larger data (8 elements)
+    let new_batch_size = 8;
+    pipeline.resize(new_batch_size).await?;
+    assert_eq!(pipeline.batch_size(), new_batch_size);
+    
+    // Second: Process with new larger size (8 elements)
+    let input2: Vec<f32> = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
+    pipeline.set_input_submission_metadata(8, 8, new_batch_size);
+    pipeline.write_input(&input2).await?;
+    pipeline.tick(2u64).await?;
+    pipeline.tick(2u64).await?;
+    
+    let Some((_tag, output2)) = pipeline.read_output().await? else {
+        panic!("Output should be ready after resize");
+    };
+    // [10,20,30,40,50,60,70,80] -> stage1: [20,40,60,80,100,120,140,160] -> stage2: [40,80,120,160,200,240,280,320]
+    assert_eq!(output2, vec![40.0, 80.0, 120.0, 160.0, 200.0, 240.0, 280.0, 320.0]);
+
+    // Resize again to handle even larger data (16 elements)
+    let larger_batch_size = 16;
+    pipeline.resize(larger_batch_size).await?;
+    assert_eq!(pipeline.batch_size(), larger_batch_size);
+    
+    // Third: Process with even larger size (16 elements)
+    let input3: Vec<f32> = vec![1.0; 16];
+    pipeline.set_input_submission_metadata(16, 16, larger_batch_size);
+    pipeline.write_input(&input3).await?;
+    pipeline.tick(3u64).await?;
+    pipeline.tick(3u64).await?;
+    
+    let Some((_tag, output3)) = pipeline.read_output().await? else {
+        panic!("Output should be ready after second resize");
+    };
+    // All 1s -> stage1: all 2s -> stage2: all 4s
+    assert_eq!(output3, vec![4.0; 16]);
     
     Ok(())
 }
