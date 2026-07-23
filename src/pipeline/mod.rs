@@ -456,14 +456,16 @@ impl<T: Clone> Pipeline<T> {
             let state = self.current_output_indices[i];
             
             // Calculate input buffer index for this stage
-            // In immediate mode, all stages process in a single tick
-            // Stage 0 reads from the input buffer, subsequent stages read from previous stage's current output
+            // In immediate mode, all stages process in a single tick in sequence
+            // Stage 0 reads from the input buffer, each subsequent stage reads from the previous stage's output buffer
             let input_buffer_idx = if i == 0 {
                 // Stage 0 reads from the input buffer that has data
                 1 - self.current_input_write_index
             } else {
-                // Read from the buffer that the previous stage wrote to in the PREVIOUS tick
-                2 + 2 * (i - 1) + (1 - self.current_output_indices[i - 1])
+                // In immediate mode: read from the buffer that the previous stage wrote to in the CURRENT tick
+                // The previous stage (i-1) writes to buffer: 2 + 2*(i-1) + current_output_indices[i-1]
+                // So we read from that same buffer
+                2 + 2 * (i - 1) + self.current_output_indices[i - 1]
             };
             
             let output_buffer_idx = 2 + 2 * i + state;

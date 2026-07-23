@@ -35,7 +35,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use anyhow::{bail, Result};
-use wgpu::CommandEncoder;
 
 use crate::wgpu_utils::{ComputeContext, stage_buffer_usages, readback_buffer_usages};
 use super::{PipelineStage, StageConfig, Stage, F32_SIZE};
