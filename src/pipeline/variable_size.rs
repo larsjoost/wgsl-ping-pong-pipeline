@@ -149,8 +149,12 @@ impl<T: Clone> VariableSizePipeline<T> {
 
     /// Resizes a specific stage's output buffers to a new size.
     /// 
-    /// This only resizes the output buffers for the specified stage, not all buffers.
-    /// The input buffers for stage 0 can be resized by passing stage_idx=0.
+    /// In a ping-pong buffer system, only ONE buffer from each pair should be resized
+    /// at a time. The other buffer retains its old size until the next tick when the
+    /// roles swap.
+    /// 
+    /// This method resizes the buffer that is NOT currently being written to (the
+    /// "read" buffer in the ping-pong pair), ensuring that in-flight data is not corrupted.
     /// 
     /// # Arguments
     /// * `stage_idx` - The stage index (0 for input buffers, 1+ for stage output buffers)
@@ -160,28 +164,104 @@ impl<T: Clone> VariableSizePipeline<T> {
             bail!("Stage index {} out of bounds (max {})", stage_idx, self.stage_configs.len());
         }
 
-        // Determine which buffers to resize
-        let buffer_indices: Vec<usize> = if stage_idx == 0 {
-            // Resize input buffers (indices 0 and 1)
-            // Also update stage 0's config
+        // Determine which buffer to resize (only ONE from the ping-pong pair)
+        // We resize the buffer that is NOT currently being written to
+        let buf_idx = if stage_idx == 0 {
+            // Input buffers: resize the one NOT being written to
+            // current_input_write_index points to the next buffer to write to
+            // So the other buffer (1 - current_input_write_index) is safe to resize
             self.stage_configs[0].output_batch_size = new_batch_size;
-            vec![0, 1]
+            1 - self.current_input_write_index
         } else {
-            // Resize output buffers for stage (stage_idx - 1)
+            // Output buffers for stage (stage_idx - 1)
             let stage_config = &mut self.stage_configs[stage_idx - 1];
             stage_config.output_batch_size = new_batch_size;
             let base_idx = 2 + 2 * (stage_idx - 1);
-            vec![base_idx, base_idx + 1]
+            // Resize the buffer that is NOT the current output target
+            // current_output_indices[stage_idx-1] is the current write target
+            // So resize the other one: 1 - current_output_indices[stage_idx-1]
+            base_idx + (1 - self.current_output_indices[stage_idx - 1])
         };
 
         let element_size = self.stage_configs[0].element_size(); // All stages have same vector_dim
         let new_buffer_size = new_batch_size as u64 * element_size as u64;
         let usages = stage_buffer_usages();
 
-        // Create new buffers and copy existing data
+        // Create new buffer and copy existing data
+        let old_buffer = &self.buffers[buf_idx];
+        let old_size = old_buffer.size();
+        let copy_size = std::cmp::min(old_size, new_buffer_size);
+
+        let new_buffer = Arc::new(self.context.create_buffer(
+            Some(&format!("Buffer {} Resized to {}", buf_idx, new_batch_size)),
+            new_buffer_size,
+            usages,
+        ));
+
         let mut encoder = self.context.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor {
                 label: Some(&format!("Stage {} Resize Encoder", stage_idx)),
+            },
+        );
+
+        // Copy existing data to new buffer
+        if copy_size > 0 {
+            encoder.copy_buffer_to_buffer(old_buffer, 0, &new_buffer, 0, copy_size);
+        }
+
+        self.buffers[buf_idx] = new_buffer;
+        
+        // Clear metadata for this buffer since it's been resized
+        if buf_idx < self.buffer_submission_metadata.len() {
+            self.buffer_submission_metadata[buf_idx] = None;
+        }
+
+        self.context.queue.submit(Some(encoder.finish()));
+        self.context.device_poll()?;
+
+        // Clear bind groups for affected stages since buffer sizes changed
+        let affected_stage = if stage_idx == 0 { 0 } else { stage_idx - 1 };
+        for i in affected_stage..self.bind_groups.len() {
+            self.bind_groups[i] = None;
+        }
+
+        Ok(())
+    }
+
+    /// Resizes both buffers in a stage's ping-pong pair to the same size.
+    /// 
+    /// This is useful when you want to ensure both buffers have the same size,
+    /// but it may cause issues if there's data in-flight. Use with caution.
+    /// 
+    /// Prefer `resize_stage()` which only resizes one buffer at a time for
+    /// proper ping-pong behavior.
+    /// 
+    /// # Arguments
+    /// * `stage_idx` - The stage index (0 for input buffers, 1+ for stage output buffers)
+    /// * `new_batch_size` - The new batch size for both buffers
+    pub async fn resize_stage_both(&mut self, stage_idx: usize, new_batch_size: usize) -> Result<()> {
+        if stage_idx > self.stage_configs.len() {
+            bail!("Stage index {} out of bounds (max {})", stage_idx, self.stage_configs.len());
+        }
+
+        // Determine which buffers to resize (both from the ping-pong pair)
+        let buffer_indices: Vec<usize> = if stage_idx == 0 {
+            self.stage_configs[0].output_batch_size = new_batch_size;
+            vec![0, 1]
+        } else {
+            let stage_config = &mut self.stage_configs[stage_idx - 1];
+            stage_config.output_batch_size = new_batch_size;
+            let base_idx = 2 + 2 * (stage_idx - 1);
+            vec![base_idx, base_idx + 1]
+        };
+
+        let element_size = self.stage_configs[0].element_size();
+        let new_buffer_size = new_batch_size as u64 * element_size as u64;
+        let usages = stage_buffer_usages();
+
+        let mut encoder = self.context.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor {
+                label: Some(&format!("Stage {} Resize Both Encoder", stage_idx)),
             },
         );
 
@@ -196,13 +276,11 @@ impl<T: Clone> VariableSizePipeline<T> {
                 usages,
             ));
 
-            // Copy existing data to new buffer
             if copy_size > 0 {
                 encoder.copy_buffer_to_buffer(old_buffer, 0, &new_buffer, 0, copy_size);
             }
 
             self.buffers[buf_idx] = new_buffer;
-            // Clear metadata for this buffer since it's been resized
             if buf_idx < self.buffer_submission_metadata.len() {
                 self.buffer_submission_metadata[buf_idx] = None;
             }
@@ -211,13 +289,41 @@ impl<T: Clone> VariableSizePipeline<T> {
         self.context.queue.submit(Some(encoder.finish()));
         self.context.device_poll()?;
 
-        // Clear bind groups for affected stages
         let affected_stage = if stage_idx == 0 { 0 } else { stage_idx - 1 };
         for i in affected_stage..self.bind_groups.len() {
             self.bind_groups[i] = None;
         }
 
         Ok(())
+    }
+
+    /// Gets the current buffer sizes for a stage's output ping-pong pair
+    /// Returns (buffer_a_size, buffer_b_size) in elements
+    /// 
+    /// # Arguments
+    /// * `stage_idx` - The stage index (0 for input buffers, 1+ for output buffers)
+    pub fn get_stage_buffer_sizes(&self, stage_idx: usize) -> (usize, usize) {
+        let element_size = self.stage_configs[0].element_size() as u64;
+        
+        if stage_idx == 0 {
+            // Input buffers are at indices 0 and 1
+            let buf_a_size = self.buffers[0].size() / element_size;
+            let buf_b_size = self.buffers[1].size() / element_size;
+            (buf_a_size as usize, buf_b_size as usize)
+        } else {
+            // Stage i output buffers are at indices 2 + 2*(i-1) and 2 + 2*(i-1) + 1
+            // Note: stage_idx 1 = stage 0's output, stage_idx 2 = stage 1's output, etc.
+            // But we need to be careful: for N stages, we have N+1 buffer pairs:
+            // - Pair 0: input buffers (2 buffers)
+            // - Pair 1: stage 0 output buffers (2 buffers)
+            // - Pair 2: stage 1 output buffers (2 buffers)
+            // So for stage_idx=2, we want pair 2 = stage 1 output = buffers 4 and 5
+            let pair_idx = stage_idx; // stage_idx 0 = input pair, 1 = stage 0 output pair, 2 = stage 1 output pair
+            let base_idx = 2 * pair_idx; // pair 0: 0-1, pair 1: 2-3, pair 2: 4-5
+            let buf_a_size = self.buffers[base_idx].size() / element_size;
+            let buf_b_size = self.buffers[base_idx + 1].size() / element_size;
+            (buf_a_size as usize, buf_b_size as usize)
+        }
     }
 
     /// Writes input data for the current write buffer
@@ -388,7 +494,8 @@ impl<T: Clone> VariableSizePipeline<T> {
         let last_output_buffer_idx = 2 + 2 * last_stage_idx + (1 - self.current_output_indices[last_stage_idx]);
         let read_buffer = &self.buffers[last_output_buffer_idx];
 
-        let buffer_size = self.stage_configs[last_stage_idx].buffer_size();
+        // Use actual buffer size, not config size, since buffers may have been selectively resized
+        let buffer_size = read_buffer.size();
         let element_count = buffer_size as usize / F32_SIZE;
 
         let readback_buffer = self.context.create_buffer(
