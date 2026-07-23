@@ -58,4 +58,5 @@ pub mod wgpu_utils;
 
 pub use pipeline::{Pipeline, PipelineBuilder, Stage};
 pub use pipeline::pipeline_stage::{PipelineStage, StageConfig};
+pub use pipeline::variable_size::{VariableSizePipeline, VariableSizePipelineBuilder, StageSizeConfig};
 pub use wgpu_utils::ComputeContext;

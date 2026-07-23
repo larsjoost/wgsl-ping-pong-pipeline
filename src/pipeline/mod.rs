@@ -7,7 +7,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub mod pipeline_stage;
+pub mod variable_size;
 pub use pipeline_stage::{PipelineStage, StageConfig};
+pub use variable_size::{VariableSizePipeline, VariableSizePipelineBuilder, StageSizeConfig};
 
 /// Element size in bytes for f32.
 pub const F32_SIZE: usize = 4;

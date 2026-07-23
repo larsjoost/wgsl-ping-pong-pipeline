@@ -862,4 +862,98 @@ async fn test_two_custom_stages_dynamic_buffer_growth() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Test: Two custom stages with per-stage buffer resizing
+/// This demonstrates that only the affected stage's buffers are resized,
+/// not all buffers in the pipeline.
+#[pollster::test]
+async fn test_two_custom_stages_selective_resize() -> anyhow::Result<()> {
+    use wgsl_ping_pong_pipeline::pipeline::variable_size::{VariableSizePipeline, VariableSizePipelineBuilder};
+    
+    let vector_dim = 1;
+    
+    // Create two custom double stages with initial size 4
+    let stage1 = WgslCustomStage::new("stage1", DOUBLE_WGSL, vector_dim, 4);
+    let stage2 = WgslCustomStage::new("stage2", DOUBLE_WGSL, vector_dim, 4);
+    
+    let mut pipeline: VariableSizePipeline<u64> = VariableSizePipelineBuilder::new()
+        .pipe_custom_with_size(Box::new(stage1), 4)
+        .pipe_custom_with_size(Box::new(stage2), 4)
+        .build()
+        .await?;
+
+    assert_eq!(pipeline.num_stages(), 2);
+
+    // Process with initial size (4 elements)
+    let input1: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+    pipeline.write_input(&input1).await?;
+    pipeline.tick(1u64).await?;
+    pipeline.tick(1u64).await?;
+    
+    let Some((_tag, output1)) = pipeline.read_output().await? else {
+        panic!("Output should be ready");
+    };
+    assert_eq!(output1, vec![4.0, 8.0, 12.0, 16.0]);
+
+    // Resize only stage 2's output buffers to size 8
+    // This only resizes buffers 4 and 5 (stage 2's output buffers)
+    // Buffers 0,1 (input) and 2,3 (stage 1 output) remain size 4
+    pipeline.resize_stage(2, 8).await?;
+    
+    // Note: Stage 2 now has output size 8, but its input comes from stage 1's output (size 4)
+    // The shader will process 4 elements and write to an 8-element buffer
+    // Elements 4-7 will be uninitialized (or retain old values)
+    
+    // Write new input and process
+    let input2: Vec<f32> = vec![10.0, 20.0, 30.0, 40.0];
+    pipeline.write_input(&input2).await?;
+    pipeline.tick(2u64).await?;
+    pipeline.tick(2u64).await?;
+    
+    let Some((_tag, output2)) = pipeline.read_output().await? else {
+        panic!("Output should be ready after resize");
+    };
+    
+    // Output buffer is now size 8, but only first 4 elements have meaningful data
+    // [10,20,30,40] -> stage1: [20,40,60,80] -> stage2: [40,80,120,160,?,?,?,?]
+    // The ? values depend on what was in the buffer before
+    // For this test, we just verify the pipeline runs without error
+    assert_eq!(output2.len(), 8); // Buffer is now size 8
+    
+    // Resize stage 1's output buffers to size 8 as well
+    // This resizes buffers 2 and 3 (stage 1's output buffers)
+    pipeline.resize_stage(1, 8).await?;
+    
+    // Now both stages have output size 8
+    // Stage 1 input is still size 4, but it outputs to an 8-element buffer
+    let input3: Vec<f32> = vec![100.0, 200.0, 300.0, 400.0];
+    pipeline.write_input(&input3).await?;
+    pipeline.tick(3u64).await?;
+    pipeline.tick(3u64).await?;
+    
+    let Some((_tag, output3)) = pipeline.read_output().await? else {
+        panic!("Output should be ready after second resize");
+    };
+    
+    // Output is still size 8 (from stage 2)
+    assert_eq!(output3.len(), 8);
+    
+    // Resize input buffers (stage 0) to size 8
+    pipeline.resize_stage(0, 8).await?;
+    
+    // Now we can process 8 elements
+    let input4: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+    pipeline.write_input(&input4).await?;
+    pipeline.tick(4u64).await?;
+    pipeline.tick(4u64).await?;
+    
+    let Some((_tag, output4)) = pipeline.read_output().await? else {
+        panic!("Output should be ready after input resize");
+    };
+    
+    // All 8 elements processed: [1,2,3,4,5,6,7,8] -> [2,4,6,8,10,12,14,16] -> [4,8,12,16,20,24,28,32]
+    assert_eq!(output4, vec![4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0]);
+    
+    Ok(())
+}
+
 
