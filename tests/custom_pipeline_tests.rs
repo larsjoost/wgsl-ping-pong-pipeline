@@ -492,7 +492,7 @@ async fn test_three_custom_stages_chain() -> anyhow::Result<()> {
 /// Test: Custom stage with side inputs (multiply with constant)
 #[pollster::test]
 async fn test_custom_stage_with_side_input() -> anyhow::Result<()> {
-    use wgsl_ping_pong_pipeline::wgpu_utils::{stage_buffer_usages, readback_buffer_usages};
+    use wgsl_ping_pong_pipeline::wgpu_utils::stage_buffer_usages;
     
     // Create a shared compute context
     let context = Arc::new(ComputeContext::new_high_performance().await?);
@@ -708,3 +708,72 @@ async fn test_custom_stage_4d_vectors() -> anyhow::Result<()> {
     assert_eq!(output, expected);
     Ok(())
 }
+
+/// Test: Two custom stages where submission metadata changes between ticks
+/// This test demonstrates that custom stages can be part of a pipeline where
+/// the submission metadata (actual_total_elements, n) changes between ticks.
+/// The pipeline buffers remain the same size, but the metadata tracks the actual
+/// data size in each submission.
+#[pollster::test]
+async fn test_two_custom_stages_with_varying_metadata() -> anyhow::Result<()> {
+    let batch_size = 8;
+    let vector_dim = 1;
+    
+    // Two custom double stages
+    let stage1 = WgslCustomStage::new("stage1", DOUBLE_WGSL, vector_dim, batch_size);
+    let stage2 = WgslCustomStage::new("stage2", DOUBLE_WGSL, vector_dim, batch_size);
+    
+    let mut pipeline: Pipeline<u64> = Pipeline::new()
+        .pipe_custom(Box::new(stage1))
+        .pipe_custom(Box::new(stage2))
+        .build()
+        .await?;
+
+    assert_eq!(pipeline.num_stages(), 2);
+
+    // Tick 1: Full buffer with metadata indicating 8 elements
+    let input1: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+    pipeline.set_input_submission_metadata(8, 8, batch_size);
+    pipeline.write_input(&input1).await?;
+    pipeline.tick(1u64).await?;
+    pipeline.tick(1u64).await?;
+    
+    let Some((_tag, output1)) = pipeline.read_output().await? else {
+        panic!("Output should be ready");
+    };
+    // [1,2,3,4,5,6,7,8] -> stage1: [2,4,6,8,10,12,14,16] -> stage2: [4,8,12,16,20,24,28,32]
+    assert_eq!(output1, vec![4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0]);
+
+    // Tick 2: Different data, metadata still 8 elements
+    let input2: Vec<f32> = vec![10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0];
+    pipeline.set_input_submission_metadata(8, 8, batch_size);
+    pipeline.write_input(&input2).await?;
+    pipeline.tick(2u64).await?;
+    pipeline.tick(2u64).await?;
+    
+    let Some((_tag, output2)) = pipeline.read_output().await? else {
+        panic!("Output should be ready");
+    };
+    // All 10s -> stage1: all 20s -> stage2: all 40s
+    assert_eq!(output2, vec![40.0; 8]);
+
+    // Tick 3: Metadata indicates only 4 actual elements (but buffer still has 8)
+    // The pipeline still processes all 8 buffer elements, but the metadata tracks that
+    // only the first 4 are "actual" data
+    let input3: Vec<f32> = vec![100.0, 200.0, 300.0, 400.0, 0.0, 0.0, 0.0, 0.0];
+    pipeline.set_input_submission_metadata(4, 4, batch_size);
+    pipeline.write_input(&input3).await?;
+    pipeline.tick(3u64).await?;
+    pipeline.tick(3u64).await?;
+    
+    let Some((_tag, output3)) = pipeline.read_output().await? else {
+        panic!("Output should be ready");
+    };
+    // [100,200,300,400,0,0,0,0] -> stage1: [200,400,600,800,0,0,0,0] -> stage2: [400,800,1200,1600,0,0,0,0]
+    assert_eq!(output3[0..4], vec![400.0, 800.0, 1200.0, 1600.0]);
+    assert_eq!(output3[4..8], vec![0.0; 4]);
+    
+    Ok(())
+}
+
+
