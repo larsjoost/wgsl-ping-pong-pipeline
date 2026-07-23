@@ -443,43 +443,27 @@ impl<T: Clone> Pipeline<T> {
         // Process tag flow through pipeline
         // Insert tag into first stage, get its previous tag
         // Then forward that tag to next stage, and so on
-        // This shifts tags forward through the pipeline
+        // In immediate mode, all stages process in a single tick, so output is ready immediately
         let mut current_tag: Option<T> = Some(tag.clone());
         for i in 0..self.stage_configs.len() {
             current_tag = self.stage_configs[i].forward_tag(current_tag);
         }
-        // current_tag now contains what was in the last stage before this tick
-
-        // Store the tag that just exited the last stage
-        // For the same tag used for all ticks, current_tag will be None for the first num_stages ticks
-        // In this case, output is ready after num_stages ticks
-        let num_stages = self.stage_configs.len() as u64;
-        let ticks_after_this = self.tick_count + 1;
         
-        if current_tag.is_none() && ticks_after_this >= num_stages {
-            // Same tag case: output is ready after num_stages ticks
-            self.last_output_tag = Some(tag);
-        } else {
-            // Different tags case: output is ready when current_tag is Some
-            self.last_output_tag = current_tag;
-        }
+        // In immediate mode, output is ready after each tick
+        self.last_output_tag = Some(tag);
 
         for i in 0..self.stage_configs.len() {
             let state = self.current_output_indices[i];
             
             // Calculate input buffer index for this stage
+            // In immediate mode, all stages process in a single tick
+            // Stage 0 reads from the input buffer, subsequent stages read from previous stage's current output
             let input_buffer_idx = if i == 0 {
-                // Stage 0 reads from the input buffer that has data.
-                // current_input_write_index points to the buffer to write to NEXT.
-                // So the buffer with data is 1 - current_input_write_index.
+                // Stage 0 reads from the input buffer that has data
                 1 - self.current_input_write_index
             } else {
-                // Staggering: read from previous stage's OTHER buffer
-                // At the start of tick, state = the buffer index stage i will write to in THIS tick
-                // In the previous tick, all stages had state = 1 - state (because we flip all at end of tick)
-                // So stage i-1 wrote to buffer 2 + 2*(i-1) + (1 - state) in the previous tick
-                // (2 instead of 1 because we now have 2 input buffers)
-                2 + 2 * (i - 1) + (1 - state)
+                // Read from the buffer that the previous stage is writing to in THIS tick
+                2 + 2 * (i - 1) + self.current_output_indices[i - 1]
             };
             
             let output_buffer_idx = 2 + 2 * i + state;
@@ -542,11 +526,7 @@ impl<T: Clone> Pipeline<T> {
                 }
                 StageConfig::Custom { stage, .. } => {
                     // Custom stage: call its encode method
-                    let input_buffer_idx = if i == 0 {
-                        1 - self.current_input_write_index
-                    } else {
-                        2 + 2 * (i - 1) + (1 - state)
-                    };
+                    // Reuse input_buffer_idx calculated above
                     let input_buffer = &self.buffers[input_buffer_idx];
                     let output_buffer = &self.buffers[output_buffer_idx];
                     

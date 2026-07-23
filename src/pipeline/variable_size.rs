@@ -360,24 +360,21 @@ impl<T: Clone> VariableSizePipeline<T> {
             current_tag = stage_config.config.forward_tag(current_tag);
         }
 
-        let num_stages = self.stage_configs.len();
-        let ticks_after_this = self.tick_count + 1;
-
-        if current_tag.is_none() && ticks_after_this >= num_stages as u64 {
-            self.last_output_tag = Some(tag);
-        } else {
-            self.last_output_tag = current_tag;
-        }
+        // In immediate mode, output is ready after each tick
+        self.last_output_tag = Some(tag);
 
         // Process each stage
         for i in 0..self.stage_configs.len() {
             let state = self.current_output_indices[i];
 
             // Calculate input buffer index
+            // In immediate mode, all stages process in a single tick
+            // Stage 0 reads from the input buffer, subsequent stages read from previous stage's current output
             let input_buffer_idx = if i == 0 {
                 1 - self.current_input_write_index
             } else {
-                2 + 2 * (i - 1) + (1 - state)
+                // Read from the buffer that the previous stage is writing to in THIS tick
+                2 + 2 * (i - 1) + self.current_output_indices[i - 1]
             };
 
             let output_buffer_idx = 2 + 2 * i + state;
