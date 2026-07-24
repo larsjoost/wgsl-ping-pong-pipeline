@@ -56,7 +56,7 @@ use crate::wgpu_utils::ComputeContext;
 ///     }
 /// }
 /// ```
-pub trait PipelineStage: Debug {
+pub trait PipelineStage: Debug + Send + Sync {
     /// Returns the name of this stage for debugging and identification.
     fn name(&self) -> &str;
     
