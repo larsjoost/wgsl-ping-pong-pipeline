@@ -125,7 +125,7 @@ pub struct VariableSizePipeline<T> {
     default_n: usize,
 }
 
-impl<T: Clone> VariableSizePipeline<T> {
+impl<T> VariableSizePipeline<T> {
     /// Creates a new variable-size pipeline builder
     pub fn builder() -> VariableSizePipelineBuilder<T> {
         VariableSizePipelineBuilder::new()
@@ -383,14 +383,26 @@ impl<T: Clone> VariableSizePipeline<T> {
             },
         );
 
-        // Process tag flow
-        let mut current_tag: Option<T> = Some(tag.clone());
+        // Process tag flow through pipeline
+        // Forward the tag through all stages to implement a delay line
+        // Each stage holds its tag for one tick, then passes it to the next stage
+        let mut current_tag: Option<T> = Some(tag);
         for stage_config in &mut self.stage_configs {
             current_tag = stage_config.config.forward_tag(current_tag);
         }
-
-        // In immediate mode, output is ready after each tick
-        self.last_output_tag = Some(tag);
+        
+        // After forwarding through all stages, get the tag from the last stage
+        // This is the tag that has propagated through the pipeline (delayed by N stages)
+        // We take ownership to avoid cloning
+        if !self.stage_configs.is_empty() {
+            let last_config = self.stage_configs.last_mut().unwrap();
+            self.last_output_tag = match &mut last_config.config {
+                StageConfig::Standard { tag, .. } => std::mem::take(tag),
+                StageConfig::Custom { tag, .. } => std::mem::take(tag),
+            };
+        } else {
+            self.last_output_tag = None;
+        }
 
         // Process each stage
         for i in 0..self.stage_configs.len() {
@@ -505,7 +517,7 @@ impl<T: Clone> VariableSizePipeline<T> {
     }
 
     /// Reads the output from the last stage
-    pub async fn read_output(&self) -> Result<Option<(Option<T>, Vec<f32>)>> {
+    pub async fn read_output(&mut self) -> Result<Option<(Option<T>, Vec<f32>)>> {
         if self.last_output_tag.is_none() {
             return Ok(None);
         }
@@ -561,7 +573,8 @@ impl<T: Clone> VariableSizePipeline<T> {
         let data: &[u8] = &buffer_slice.get_mapped_range();
         let result: Vec<f32> = bytemuck::cast_slice(&data[..element_count * F32_SIZE]).to_vec();
 
-        Ok(Some((self.last_output_tag.clone(), result)))
+        let output_tag = self.last_output_tag.take();
+        Ok(Some((output_tag, result)))
     }
 }
 
@@ -573,7 +586,7 @@ pub struct VariableSizePipelineBuilder<T> {
     _phantom: std::marker::PhantomData<T>,
 }
 
-impl<T: Clone> VariableSizePipelineBuilder<T> {
+impl<T> VariableSizePipelineBuilder<T> {
     pub fn new() -> Self {
         Self {
             stage_configs: Vec::new(),

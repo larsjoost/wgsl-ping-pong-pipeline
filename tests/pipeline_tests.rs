@@ -179,3 +179,104 @@ async fn test_change_write_data_size_during_operation() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// A test tag struct that does NOT implement Clone (to verify no cloning is needed)
+#[derive(Debug, PartialEq)]
+struct NonCloneTag {
+    id: u64,
+    data: String,
+}
+
+impl NonCloneTag {
+    fn new(id: u64, data: &str) -> Self {
+        Self {
+            id,
+            data: data.to_string(),
+        }
+    }
+}
+
+/// Test: Verify that tags follow data through the pipeline without requiring Clone
+#[pollster::test]
+async fn test_tag_follows_data_without_clone() -> anyhow::Result<()> {
+    let stage = Stage::identity("identity", 2, 4);
+    let mut pipeline: Pipeline<NonCloneTag> = Pipeline::new()
+        .pipe(stage)
+        .build()
+        .await?;
+
+    // Input data: 4 vectors of 2D (8 f32 values)
+    let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+    pipeline.write_input(&input).await?;
+
+    // Tick with a specific tag
+    let tag1 = NonCloneTag::new(42, "first");
+    pipeline.tick(tag1).await?;
+
+    // Read output - should get the same tag back
+    let Some((returned_tag, output)) = pipeline.read_output().await? else {
+        panic!("Output should be ready after ticking");
+    };
+
+    // Verify the tag is returned correctly
+    assert_eq!(returned_tag, Some(NonCloneTag::new(42, "first")));
+    assert_eq!(output, input);
+
+    // Write new data and tick with a different tag
+    let input2: Vec<f32> = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
+    pipeline.write_input(&input2).await?;
+
+    let tag2 = NonCloneTag::new(99, "second");
+    pipeline.tick(tag2).await?;
+
+    // Read output - should get the second tag
+    let Some((returned_tag, output)) = pipeline.read_output().await? else {
+        panic!("Output should be ready after ticking");
+    };
+
+    assert_eq!(returned_tag, Some(NonCloneTag::new(99, "second")));
+    assert_eq!(output, input2);
+
+    Ok(())
+}
+
+/// Test: Verify tags follow data through multiple stages
+/// In staggered mode, data takes N ticks to propagate through N stages
+#[pollster::test]
+async fn test_tag_follows_data_through_multiple_stages() -> anyhow::Result<()> {
+    let stage1 = Stage::identity("id1", 2, 4);
+    let stage2 = Stage::identity("id2", 2, 4);
+    let mut pipeline: Pipeline<NonCloneTag> = Pipeline::new()
+        .pipe(stage1)
+        .pipe(stage2)
+        .build()
+        .await?;
+
+    // Input data
+    let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+    pipeline.write_input(&input).await?;
+
+    // Tick with tag - in staggered mode, need N ticks for N stages
+    let tag1 = NonCloneTag::new(123, "first");
+    pipeline.tick(tag1).await?;
+    
+    // First tick: data is in stage 0, not yet at output
+    // Read should return None
+    let result1 = pipeline.read_output().await?;
+    assert!(result1.is_none(), "Output should not be ready after first tick in 2-stage pipeline");
+
+    // Second tick: data propagates to stage 1 and output is ready
+    let tag2 = NonCloneTag::new(456, "second");
+    pipeline.tick(tag2).await?;
+
+    // Read output - should get the tag from first tick (123)
+    let Some((returned_tag, output)) = pipeline.read_output().await? else {
+        panic!("Output should be ready after second tick");
+    };
+
+    // Verify tag from first tick follows the data
+    assert_eq!(returned_tag, Some(NonCloneTag::new(123, "first")));
+    assert_eq!(output, input);
+
+    Ok(())
+}

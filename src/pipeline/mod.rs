@@ -103,7 +103,7 @@ pub struct PipelineBuilder<T> {
     _phantom: std::marker::PhantomData<T>,
 }
 
-impl<T: Clone> PipelineBuilder<T> {
+impl<T> PipelineBuilder<T> {
     pub fn new() -> Self {
         Self {
             stages: Vec::new(),
@@ -195,7 +195,7 @@ pub struct Pipeline<T> {
     default_n: usize,
 }
 
-impl<T: Clone> Pipeline<T> {
+impl<T> Pipeline<T> {
     pub fn new() -> PipelineBuilder<T> {
         PipelineBuilder::new()
     }
@@ -443,14 +443,26 @@ impl<T: Clone> Pipeline<T> {
         // Process tag flow through pipeline
         // Insert tag into first stage, get its previous tag
         // Then forward that tag to next stage, and so on
-        // In immediate mode, all stages process in a single tick, so output is ready immediately
-        let mut current_tag: Option<T> = Some(tag.clone());
+        // In staggered mode, data takes N ticks to propagate through N stages
+        
+        // Forward the tag through all stages to implement a delay line
+        // Each stage holds its tag for one tick, then passes it to the next stage
+        let mut current_tag: Option<T> = Some(tag);
         for i in 0..self.stage_configs.len() {
             current_tag = self.stage_configs[i].forward_tag(current_tag);
         }
         
-        // In immediate mode, output is ready after each tick
-        self.last_output_tag = Some(tag);
+        // After forwarding through all stages, get the tag from the last stage
+        // This is the tag that has propagated through the pipeline (delayed by N stages)
+        // We take ownership to avoid cloning
+        if !self.stage_configs.is_empty() {
+            self.last_output_tag = match self.stage_configs.last_mut().unwrap() {
+                StageConfig::Standard { tag, .. } => std::mem::take(tag),
+                StageConfig::Custom { tag, .. } => std::mem::take(tag),
+            };
+        } else {
+            self.last_output_tag = None;
+        }
 
         for i in 0..self.stage_configs.len() {
             let state = self.current_output_indices[i];
@@ -619,7 +631,7 @@ impl<T: Clone> Pipeline<T> {
         Ok(())
     }
 
-    pub async fn read_output(&self) -> Result<Option<(Option<T>, Vec<f32>)>> {
+    pub async fn read_output(&mut self) -> Result<Option<(Option<T>, Vec<f32>)>> {
         // Return None if no tick has been called yet (tag is None)
         if self.last_output_tag.is_none() {
             return Ok(None);
@@ -679,7 +691,9 @@ impl<T: Clone> Pipeline<T> {
         let data: &[u8] = &buffer_slice.get_mapped_range();
         let result: Vec<f32> = bytemuck::cast_slice(&data[..element_count * F32_SIZE]).to_vec();
 
-        Ok(Some((self.last_output_tag.clone(), result)))
+        let output_tag = self.last_output_tag.take();
+
+        Ok(Some((output_tag, result)))
     }
 
     pub async fn resize(&mut self, new_batch_size: usize) -> Result<()> {

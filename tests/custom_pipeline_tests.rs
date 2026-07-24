@@ -988,7 +988,7 @@ async fn test_selective_resize_one_buffer_only() -> anyhow::Result<()> {
 }
 
 /// Test: Changing write data size during operation with Custom stages.
-/// In immediate mode: write data -> tick -> read output -> write new data -> tick -> read new output
+/// In staggered mode: write -> tick N times -> read -> write -> tick N times -> read
 #[pollster::test]
 async fn test_custom_stage_change_write_data_size_during_operation() -> anyhow::Result<()> {
     let stage1 = WgslCustomStage::new("custom_stage1", DOUBLE_WGSL, 2, 4);
@@ -1002,30 +1002,31 @@ async fn test_custom_stage_change_write_data_size_during_operation() -> anyhow::
 
     assert_eq!(pipeline.num_stages(), 2);
 
-    // 1. Write data with first size (4 floats = 2 vectors of 2D)
-    let input1: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+    // 1. Write first data (8 floats = 4 vectors of 2D)
+    let input1: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     pipeline.write_input(&input1).await?;
 
-    // 2. Tick
+    // 2. Tick twice for 2-stage pipeline (staggered mode)
+    pipeline.tick(1u64).await?;
     pipeline.tick(1u64).await?;
 
-    // 3. Read first data immediately: [1,2,3,4] -> stage1: [2,4,6,8] -> stage2: [4,8,12,16]
+    // 3. Read first data: [1,2,3,4,5,6,7,8] -> stage1: double -> stage2: double -> [4,8,12,16,20,24,28,32]
     let Some((_tag, output1)) = pipeline.read_output().await? else {
         panic!("First output should be ready");
     };
-    assert_eq!(output1, vec![4.0, 8.0, 12.0, 16.0]);
+    assert_eq!(output1, vec![4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0]);
 
-    // 4. Write data with another size (12 floats = 6 vectors of 2D)
+    // 4. Write second data (8 floats)
     let input2: Vec<f32> = vec![
-        10.0, 20.0, 30.0, 40.0, 50.0, 60.0,
-        70.0, 80.0, 90.0, 100.0, 110.0, 120.0,
+        10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0,
     ];
     pipeline.write_input(&input2).await?;
 
-    // 5. Tick
+    // 5. Tick twice
+    pipeline.tick(2u64).await?;
     pipeline.tick(2u64).await?;
 
-    // 6. Read second data immediately: [10,20,...,120] -> double twice -> [40,80,...,480]
+    // 6. Read second data: [10,20,...,80] -> double twice -> [40,80,...,320]
     let Some((_tag, output2)) = pipeline.read_output().await? else {
         panic!("Second output should be ready");
     };
