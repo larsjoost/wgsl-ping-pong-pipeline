@@ -592,7 +592,7 @@ async fn test_complex_mixed_pipeline() -> anyhow::Result<()> {
 
     // Tick 4 times (4 stages)
     for _ in 0..4 {
-        pipeline.tick(1u64).await?;
+        pipeline.tick(Some(1u64)).await?;
     }
 
     let Some((_tag, output)) = pipeline.read_output().await? else {
@@ -623,7 +623,7 @@ async fn test_custom_stage_large_batch() -> anyhow::Result<()> {
     let expected: Vec<f32> = vec![2.0; batch_size * vector_dim];
     
     pipeline.write_input(&input).await?;
-    pipeline.tick(1u64).await?;
+    pipeline.tick(Some(1u64)).await?;
 
     let Some((_tag, output)) = pipeline.read_output().await? else {
         panic!("Output should be ready after ticking");
@@ -655,8 +655,8 @@ async fn test_multiple_custom_stage_instances() -> anyhow::Result<()> {
     pipeline.write_input(&input).await?;
 
     // Tick twice
-    pipeline.tick(1u64).await?;
-    pipeline.tick(1u64).await?;
+    pipeline.tick(Some(1u64)).await?;
+    pipeline.tick(Some(1u64)).await?;
 
     let Some((_tag, output)) = pipeline.read_output().await? else {
         panic!("Output should be ready after ticking");
@@ -683,7 +683,7 @@ async fn test_custom_stage_scalar() -> anyhow::Result<()> {
     let expected: Vec<f32> = vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
     
     pipeline.write_input(&input).await?;
-    pipeline.tick(1u64).await?;
+    pipeline.tick(Some(1u64)).await?;
 
     let Some((_tag, output)) = pipeline.read_output().await? else {
         panic!("Output should be ready after ticking");
@@ -713,7 +713,7 @@ async fn test_custom_stage_4d_vectors() -> anyhow::Result<()> {
     let expected: Vec<f32> = vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
     
     pipeline.write_input(&input).await?;
-    pipeline.tick(1u64).await?;
+    pipeline.tick(Some(1u64)).await?;
 
     let Some((_tag, output)) = pipeline.read_output().await? else {
         panic!("Output should be ready after ticking");
@@ -748,8 +748,8 @@ async fn test_two_custom_stages_with_varying_metadata() -> anyhow::Result<()> {
     let input1: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     pipeline.set_input_submission_metadata(8, 8, batch_size);
     pipeline.write_input(&input1).await?;
-    pipeline.tick(1u64).await?;
-    pipeline.tick(1u64).await?;
+    pipeline.tick(Some(1u64)).await?;
+    pipeline.tick(Some(1u64)).await?;
     
     let Some((_tag, output1)) = pipeline.read_output().await? else {
         panic!("Output should be ready");
@@ -761,8 +761,8 @@ async fn test_two_custom_stages_with_varying_metadata() -> anyhow::Result<()> {
     let input2: Vec<f32> = vec![10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0];
     pipeline.set_input_submission_metadata(8, 8, batch_size);
     pipeline.write_input(&input2).await?;
-    pipeline.tick(2u64).await?;
-    pipeline.tick(2u64).await?;
+    pipeline.tick(Some(2u64)).await?;
+    pipeline.tick(Some(2u64)).await?;
     
     let Some((_tag, output2)) = pipeline.read_output().await? else {
         panic!("Output should be ready");
@@ -776,8 +776,8 @@ async fn test_two_custom_stages_with_varying_metadata() -> anyhow::Result<()> {
     let input3: Vec<f32> = vec![100.0, 200.0, 300.0, 400.0, 0.0, 0.0, 0.0, 0.0];
     pipeline.set_input_submission_metadata(4, 4, batch_size);
     pipeline.write_input(&input3).await?;
-    pipeline.tick(3u64).await?;
-    pipeline.tick(3u64).await?;
+    pipeline.tick(Some(3u64)).await?;
+    pipeline.tick(Some(3u64)).await?;
     
     let Some((_tag, output3)) = pipeline.read_output().await? else {
         panic!("Output should be ready");
@@ -814,8 +814,8 @@ async fn test_two_custom_stages_dynamic_buffer_growth() -> anyhow::Result<()> {
     let input1: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
     pipeline.set_input_submission_metadata(4, 4, initial_batch_size);
     pipeline.write_input(&input1).await?;
-    pipeline.tick(1u64).await?;
-    pipeline.tick(1u64).await?;
+    pipeline.tick(Some(1u64)).await?;
+    pipeline.tick(Some(1u64)).await?;
     
     let Some((_tag, output1)) = pipeline.read_output().await? else {
         panic!("Output should be ready");
@@ -832,8 +832,8 @@ async fn test_two_custom_stages_dynamic_buffer_growth() -> anyhow::Result<()> {
     let input2: Vec<f32> = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
     pipeline.set_input_submission_metadata(8, 8, new_batch_size);
     pipeline.write_input(&input2).await?;
-    pipeline.tick(2u64).await?;
-    pipeline.tick(2u64).await?;
+    pipeline.tick(Some(2u64)).await?;
+    pipeline.tick(Some(2u64)).await?;
     
     let Some((_tag, output2)) = pipeline.read_output().await? else {
         panic!("Output should be ready after resize");
@@ -850,8 +850,8 @@ async fn test_two_custom_stages_dynamic_buffer_growth() -> anyhow::Result<()> {
     let input3: Vec<f32> = vec![1.0; 16];
     pipeline.set_input_submission_metadata(16, 16, larger_batch_size);
     pipeline.write_input(&input3).await?;
-    pipeline.tick(3u64).await?;
-    pipeline.tick(3u64).await?;
+    pipeline.tick(Some(3u64)).await?;
+    pipeline.tick(Some(3u64)).await?;
     
     let Some((_tag, output3)) = pipeline.read_output().await? else {
         panic!("Output should be ready after second resize");
@@ -1007,8 +1007,8 @@ async fn test_custom_stage_change_write_data_size_during_operation() -> anyhow::
     pipeline.write_input(&input1).await?;
 
     // 2. Tick twice for 2-stage pipeline (staggered mode)
-    pipeline.tick(1u64).await?;
-    pipeline.tick(1u64).await?;
+    pipeline.tick(Some(1u64)).await?;
+    pipeline.tick(Some(1u64)).await?;
 
     // 3. Read first data: [1,2,3,4,5,6,7,8] -> stage1: double -> stage2: double -> [4,8,12,16,20,24,28,32]
     let Some((_tag, output1)) = pipeline.read_output().await? else {
@@ -1023,8 +1023,8 @@ async fn test_custom_stage_change_write_data_size_during_operation() -> anyhow::
     pipeline.write_input(&input2).await?;
 
     // 5. Tick twice
-    pipeline.tick(2u64).await?;
-    pipeline.tick(2u64).await?;
+    pipeline.tick(Some(2u64)).await?;
+    pipeline.tick(Some(2u64)).await?;
 
     // 6. Read second data: [10,20,...,80] -> double twice -> [40,80,...,320]
     let Some((_tag, output2)) = pipeline.read_output().await? else {

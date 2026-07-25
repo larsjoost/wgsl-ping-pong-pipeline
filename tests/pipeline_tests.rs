@@ -74,8 +74,8 @@ async fn test_two_stage_identity() -> anyhow::Result<()> {
     pipeline.write_input(&input).await?;
 
     // Tick twice (data needs 2 ticks for 2 stages)
-    let _output_tag1 = pipeline.tick(1u64).await?;
-    let _output_tag2 = pipeline.tick(1u64).await?;
+    let _output_tag1 = pipeline.tick(Some(1u64)).await?;
+    let _output_tag2 = pipeline.tick(Some(1u64)).await?;
 
     let Some((_tag, output)) = pipeline.read_output().await? else {
         panic!("Output should be ready after ticking");
@@ -103,9 +103,9 @@ async fn test_three_stage_identity() -> anyhow::Result<()> {
     pipeline.write_input(&input).await?;
 
     // Tick three times (data needs 3 ticks for 3 stages)
-    let _output_tag1 = pipeline.tick(1u64).await?;
-    let _output_tag2 = pipeline.tick(1u64).await?;
-    let _output_tag3 = pipeline.tick(1u64).await?;
+    let _output_tag1 = pipeline.tick(Some(1u64)).await?;
+    let _output_tag2 = pipeline.tick(Some(1u64)).await?;
+    let _output_tag3 = pipeline.tick(Some(1u64)).await?;
 
     let Some((_tag, output)) = pipeline.read_output().await? else {
         panic!("Output should be ready after ticking");
@@ -128,7 +128,7 @@ async fn test_single_stage_double() -> anyhow::Result<()> {
     let expected: Vec<f32> = vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
 
     // Tick once to process
-    let _output_tag = pipeline.tick(1u64).await?;
+    let _output_tag = pipeline.tick(Some(1u64)).await?;
 
     let Some((_tag, output)) = pipeline.read_output().await? else {
         panic!("Output should be ready after ticking");
@@ -154,8 +154,8 @@ async fn test_change_write_data_size_during_operation() -> anyhow::Result<()> {
     pipeline.write_input(&input1).await?;
 
     // 2. Tick twice for 2-stage pipeline (staggered mode)
-    pipeline.tick(1u64).await?;
-    pipeline.tick(1u64).await?;
+    pipeline.tick(Some(1u64)).await?;
+    pipeline.tick(Some(1u64)).await?;
 
     // 3. Read first data
     let Some((_tag, output1)) = pipeline.read_output().await? else {
@@ -168,8 +168,8 @@ async fn test_change_write_data_size_during_operation() -> anyhow::Result<()> {
     pipeline.write_input(&input2).await?;
 
     // 5. Tick twice
-    pipeline.tick(2u64).await?;
-    pipeline.tick(2u64).await?;
+    pipeline.tick(Some(2u64)).await?;
+    pipeline.tick(Some(2u64)).await?;
 
     // 6. Read second data
     let Some((_tag, output2)) = pipeline.read_output().await? else {
@@ -211,7 +211,7 @@ async fn test_tag_follows_data_without_clone() -> anyhow::Result<()> {
 
     // Tick with a specific tag
     let tag1 = NonCloneTag::new(42, "first");
-    pipeline.tick(tag1).await?;
+    pipeline.tick(Some(tag1)).await?;
 
     // Read output - should get the same tag back
     let Some((returned_tag, output)) = pipeline.read_output().await? else {
@@ -227,7 +227,7 @@ async fn test_tag_follows_data_without_clone() -> anyhow::Result<()> {
     pipeline.write_input(&input2).await?;
 
     let tag2 = NonCloneTag::new(99, "second");
-    pipeline.tick(tag2).await?;
+    pipeline.tick(Some(tag2)).await?;
 
     // Read output - should get the second tag
     let Some((returned_tag, output)) = pipeline.read_output().await? else {
@@ -258,7 +258,7 @@ async fn test_tag_follows_data_through_multiple_stages() -> anyhow::Result<()> {
 
     // Tick with tag - in staggered mode, need N ticks for N stages
     let tag1 = NonCloneTag::new(123, "first");
-    pipeline.tick(tag1).await?;
+    pipeline.tick(Some(tag1)).await?;
     
     // First tick: data is in stage 0, not yet at output
     // Read should return None
@@ -267,7 +267,7 @@ async fn test_tag_follows_data_through_multiple_stages() -> anyhow::Result<()> {
 
     // Second tick: data propagates to stage 1 and output is ready
     let tag2 = NonCloneTag::new(456, "second");
-    pipeline.tick(tag2).await?;
+    pipeline.tick(Some(tag2)).await?;
 
     // Read output - should get the tag from first tick (123)
     let Some((returned_tag, output)) = pipeline.read_output().await? else {

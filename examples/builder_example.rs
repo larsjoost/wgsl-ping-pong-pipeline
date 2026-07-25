@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Tick the pipeline
     for i in 0..pipeline.num_stages() {
-        let _output_tag = pipeline.tick(1u64).await?;
+        let _output_tag = pipeline.tick(Some(1u64)).await?;
         println!("Tick {}", i + 1);
     }
 

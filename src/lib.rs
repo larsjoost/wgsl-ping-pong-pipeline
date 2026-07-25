@@ -42,9 +42,9 @@
 //!     pipeline.write_input(&input).await?;
 //!
 //!     // Advance pipeline by 3 ticks (data propagates through 3 stages)
-//!     pipeline.tick(1u64).await?;
-//!     pipeline.tick(1u64).await?;
-//!     pipeline.tick(1u64).await?;
+//!     pipeline.tick(Some(1u64)).await?;
+//!     pipeline.tick(Some(1u64)).await?;
+//!     pipeline.tick(Some(1u64)).await?;
 //!
 //!     Ok(())
 //! }
