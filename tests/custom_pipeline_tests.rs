@@ -335,7 +335,7 @@ async fn test_single_custom_identity_stage() -> anyhow::Result<()> {
     pipeline.write_input(&input).await?;
 
     // Tick once (data propagates through 1 stage)
-    let _output_tag = pipeline.tick(1u64).await?;
+    let _output_tag = pipeline.tick(Some(1u64)).await?;
 
     // Read output
     let Some((_tag, output)) = pipeline.read_output().await? else {
@@ -368,7 +368,7 @@ async fn test_single_custom_double_stage() -> anyhow::Result<()> {
     let expected: Vec<f32> = vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
 
     // Tick once to process
-    let _output_tag = pipeline.tick(1u64).await?;
+    let _output_tag = pipeline.tick(Some(1u64)).await?;
 
     let Some((_tag, output)) = pipeline.read_output().await? else {
         panic!("Output should be ready after ticking");
@@ -394,8 +394,8 @@ async fn test_two_custom_identity_stages() -> anyhow::Result<()> {
     pipeline.write_input(&input).await?;
 
     // Tick twice (data needs 2 ticks for 2 stages)
-    let _output_tag1 = pipeline.tick(1u64).await?;
-    let _output_tag2 = pipeline.tick(1u64).await?;
+    let _output_tag1 = pipeline.tick(Some(1u64)).await?;
+    let _output_tag2 = pipeline.tick(Some(1u64)).await?;
 
     let Some((_tag, output)) = pipeline.read_output().await? else {
         panic!("Output should be ready after ticking");
@@ -425,8 +425,8 @@ async fn test_mixed_standard_then_custom() -> anyhow::Result<()> {
     pipeline.write_input(&input).await?;
 
     // Tick twice (2 stages)
-    let _output_tag1 = pipeline.tick(1u64).await?;
-    let _output_tag2 = pipeline.tick(1u64).await?;
+    let _output_tag1 = pipeline.tick(Some(1u64)).await?;
+    let _output_tag2 = pipeline.tick(Some(1u64)).await?;
 
     let Some((_tag, output)) = pipeline.read_output().await? else {
         panic!("Output should be ready after ticking");
@@ -456,8 +456,8 @@ async fn test_mixed_custom_then_standard() -> anyhow::Result<()> {
     pipeline.write_input(&input).await?;
 
     // Tick twice (2 stages)
-    let _output_tag1 = pipeline.tick(1u64).await?;
-    let _output_tag2 = pipeline.tick(1u64).await?;
+    let _output_tag1 = pipeline.tick(Some(1u64)).await?;
+    let _output_tag2 = pipeline.tick(Some(1u64)).await?;
 
     let Some((_tag, output)) = pipeline.read_output().await? else {
         panic!("Output should be ready after ticking");
@@ -491,9 +491,9 @@ async fn test_three_custom_stages_chain() -> anyhow::Result<()> {
     pipeline.write_input(&input).await?;
 
     // Tick three times (3 stages)
-    let _output_tag1 = pipeline.tick(1u64).await?;
-    let _output_tag2 = pipeline.tick(1u64).await?;
-    let _output_tag3 = pipeline.tick(1u64).await?;
+    let _output_tag1 = pipeline.tick(Some(1u64)).await?;
+    let _output_tag2 = pipeline.tick(Some(1u64)).await?;
+    let _output_tag3 = pipeline.tick(Some(1u64)).await?;
 
     let Some((_tag, output)) = pipeline.read_output().await? else {
         panic!("Output should be ready after ticking");
@@ -545,7 +545,7 @@ async fn test_custom_stage_with_side_input() -> anyhow::Result<()> {
     pipeline.write_input(&input).await?;
 
     // Tick once
-    let _output_tag = pipeline.tick(1u64).await?;
+    let _output_tag = pipeline.tick(Some(1u64)).await?;
 
     let Some((_tag, output)) = pipeline.read_output().await? else {
         panic!("Output should be ready after ticking");

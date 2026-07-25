@@ -433,7 +433,7 @@ impl<T> Pipeline<T> {
         )
     }
 
-    pub async fn tick(&mut self, tag: T) -> Result<()> {
+    pub async fn tick(&mut self, tag: Option<T>) -> Result<()> {
         let mut encoder = self.context.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor {
                 label: Some(&format!("Tick {} Encoder", self.tick_count)),
@@ -447,7 +447,7 @@ impl<T> Pipeline<T> {
         
         // Forward the tag through all stages to implement a delay line
         // Each stage holds its tag for one tick, then passes it to the next stage
-        let mut current_tag: Option<T> = Some(tag);
+        let mut current_tag: Option<T> = tag;
         for i in 0..self.stage_configs.len() {
             current_tag = self.stage_configs[i].forward_tag(current_tag);
         }
@@ -564,6 +564,18 @@ impl<T> Pipeline<T> {
         self.tick_count += 1;
 
         Ok(())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        if !self.last_output_tag.is_none() {
+            return false;
+        }
+        for i in 0..self.stage_configs.len() {
+            if !self.stage_configs[i].is_empty() {
+                return false;
+            }
+        }
+        true
     }
 
     /// Sets the default n value for the pipeline.

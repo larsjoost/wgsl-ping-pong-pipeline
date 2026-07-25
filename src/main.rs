@@ -76,13 +76,13 @@ async fn main() -> anyhow::Result<()> {
     // Advance pipeline by 3 ticks (data needs 3 ticks to propagate through 3 stages)
     // We use a simple tag (u64) to track the data flow
     let tag = 1u64;
-    let output_tag = pipeline.tick(tag).await?;
+    let output_tag = pipeline.tick(Some(tag)).await?;
     println!("Tick 1: Data in stage 1, output tag: {:?}", output_tag);
 
-    let output_tag = pipeline.tick(2u64).await?;
+    let output_tag = pipeline.tick(Some(2u64)).await?;
     println!("Tick 2: Data in stage 2, output tag: {:?}", output_tag);
 
-    let output_tag = pipeline.tick(3u64).await?;
+    let output_tag = pipeline.tick(Some(3u64)).await?;
     println!("Tick 3: Data in stage 3 (output ready), output tag: {:?}", output_tag);
 
     // Read output from last stage (returns Option<(tag, data)>)

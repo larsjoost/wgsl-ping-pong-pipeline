@@ -49,7 +49,7 @@ async fn test_single_stage_identity() -> anyhow::Result<()> {
     pipeline.write_input(&input).await?;
 
     // Tick once (data propagates through 1 stage)
-    let _output_tag = pipeline.tick(1u64).await?;
+    let _output_tag = pipeline.tick(Some(1u64)).await?;
 
     // Read output (returns Option<(tag, data)>)
     let Some((_tag, output)) = pipeline.read_output().await? else {

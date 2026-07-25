@@ -259,6 +259,10 @@ impl<T> StageConfig<T> {
         }
     }
     
+    pub fn is_empty(&self) -> bool {
+        self.tag().is_none()
+    }
+
     /// Returns true if this stage config supports dynamic resizing.
     pub fn supports_dynamic_resizing(&self) -> bool {
         match self {
