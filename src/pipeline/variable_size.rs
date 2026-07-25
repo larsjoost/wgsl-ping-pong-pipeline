@@ -770,8 +770,6 @@ fn create_bind_group_layout(context: &ComputeContext) -> wgpu::BindGroupLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pollster::block_on;
-    use wgpu::CommandEncoder;
 
     const DOUBLE_WGSL: &str = r#"
     @group(0) @binding(0)
@@ -787,25 +785,6 @@ mod tests {
         output[idx] = input[idx] * 2.0;
     }
     "#;
-
-    /// Simple custom stage for testing
-    #[derive(Debug)]
-    struct TestCustomStage {
-        name: String,
-        vector_dim: usize,
-        batch_size: usize,
-    }
-
-    impl PipelineStage for TestCustomStage {
-        fn name(&self) -> &str { &self.name }
-        fn vector_dim(&self) -> usize { self.vector_dim }
-        fn batch_size(&self) -> usize { self.batch_size }
-        fn encode(&self, _encoder: &mut CommandEncoder, _input: &wgpu::Buffer, _output: &wgpu::Buffer, _side_inputs: &HashMap<String, Arc<wgpu::Buffer>>) -> Result<()> {
-            Ok(())
-        }
-        fn initialize(&mut self, _context: &ComputeContext) -> Result<()> { Ok(()) }
-        fn requires_initialization(&self) -> bool { false }
-    }
 
     #[test]
     fn test_builder_creation() {

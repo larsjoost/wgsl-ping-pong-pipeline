@@ -2,6 +2,11 @@
 name = "wgsl-ping-pong-pipeline"
 version = "0.1.0"
 edition = "2024"
+description = "A high-throughput pipelined compute cascade using WGSL and wgpu with isolated per-stage ping-pong buffers for maximum parallel throughput"
+license = "MIT"
+repository = "https://github.com/larsjoost/wgsl-ping-pong-pipeline"
+homepage = "https://github.com/larsjoost/wgsl-ping-pong-pipeline"
+documentation = "https://docs.rs/wgsl-ping-pong-pipeline"
 
 [dependencies]
 wgpu = { version = "29.0", features = ["spirv"] }
@@ -18,7 +23,4 @@ futures-intrusive = "0.5"
 name = "builder_example"
 path = "examples/builder_example.rs"
 
-[profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
+
