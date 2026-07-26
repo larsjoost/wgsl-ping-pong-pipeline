@@ -60,8 +60,16 @@ async fn main() -> anyhow::Result<()> {
         println!("Output not ready yet");
         return Ok(());
     };
-    println!("Output read: {} elements, tag: {:?}", output.len(), output_tag);
-    println!("Output matches input (first {} elements): {}", input.len(), output[..input.len()] == input);
+    println!(
+        "Output read: {} elements, tag: {:?}",
+        output.len(),
+        output_tag
+    );
+    println!(
+        "Output matches input (first {} elements): {}",
+        input.len(),
+        output[..input.len()] == input
+    );
 
     Ok(())
 }

@@ -83,7 +83,9 @@ async fn test_three_stage_identity() -> anyhow::Result<()> {
 
     assert_eq!(pipeline.num_stages(), 3);
 
-    let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0];
+    let input: Vec<f32> = vec![
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+    ];
     pipeline.write_input(&input).await?;
 
     // Tick three times (data needs 3 ticks for 3 stages)
@@ -107,7 +109,7 @@ async fn test_single_stage_double() -> anyhow::Result<()> {
     // Input: [1,2, 3,4, 5,6, 7,8] (4 vectors of 2D)
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     pipeline.write_input(&input).await?;
-    
+
     // Expected: [2,4, 6,8, 10,12, 14,16]
     let expected: Vec<f32> = vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
 
@@ -127,11 +129,7 @@ async fn test_single_stage_double() -> anyhow::Result<()> {
 async fn test_change_write_data_size_during_operation() -> anyhow::Result<()> {
     let stage1 = Stage::identity("id1", 2, 4);
     let stage2 = Stage::identity("id2", 2, 4);
-    let mut pipeline: Pipeline<u64> = Pipeline::new()
-        .pipe(stage1)
-        .pipe(stage2)
-        .build()
-        .await?;
+    let mut pipeline: Pipeline<u64> = Pipeline::new().pipe(stage1).pipe(stage2).build().await?;
 
     // 1. Write first data (8 floats = 4 vectors of 2D)
     let input1: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
@@ -184,10 +182,7 @@ impl NonCloneTag {
 #[pollster::test]
 async fn test_tag_follows_data_without_clone() -> anyhow::Result<()> {
     let stage = Stage::identity("identity", 2, 4);
-    let mut pipeline: Pipeline<NonCloneTag> = Pipeline::new()
-        .pipe(stage)
-        .build()
-        .await?;
+    let mut pipeline: Pipeline<NonCloneTag> = Pipeline::new().pipe(stage).build().await?;
 
     // Input data: 4 vectors of 2D (8 f32 values)
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
@@ -230,11 +225,8 @@ async fn test_tag_follows_data_without_clone() -> anyhow::Result<()> {
 async fn test_tag_follows_data_through_multiple_stages() -> anyhow::Result<()> {
     let stage1 = Stage::identity("id1", 2, 4);
     let stage2 = Stage::identity("id2", 2, 4);
-    let mut pipeline: Pipeline<NonCloneTag> = Pipeline::new()
-        .pipe(stage1)
-        .pipe(stage2)
-        .build()
-        .await?;
+    let mut pipeline: Pipeline<NonCloneTag> =
+        Pipeline::new().pipe(stage1).pipe(stage2).build().await?;
 
     // Input data
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
@@ -243,11 +235,14 @@ async fn test_tag_follows_data_through_multiple_stages() -> anyhow::Result<()> {
     // Tick with tag - in staggered mode, need N ticks for N stages
     let tag1 = NonCloneTag::new(123, "first");
     pipeline.tick(Some(tag1)).await?;
-    
+
     // First tick: data is in stage 0, not yet at output
     // Read should return None
     let result1 = pipeline.read_output().await?;
-    assert!(result1.is_none(), "Output should not be ready after first tick in 2-stage pipeline");
+    assert!(
+        result1.is_none(),
+        "Output should not be ready after first tick in 2-stage pipeline"
+    );
 
     // Second tick: data propagates to stage 1 and output is ready
     let tag2 = NonCloneTag::new(456, "second");

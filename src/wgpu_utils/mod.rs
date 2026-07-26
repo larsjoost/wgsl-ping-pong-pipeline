@@ -53,14 +53,12 @@ impl ComputeContext {
 
         // Request device with compute features
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("Ping-Pong Pipeline Device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    ..Default::default()
-                },
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("Ping-Pong Pipeline Device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                ..Default::default()
+            })
             .await
             .context("Failed to create WGPU device")?;
 
@@ -124,8 +122,9 @@ impl ComputeContext {
         data: &[T],
         usage: wgpu::BufferUsages,
     ) -> wgpu::Buffer {
-        let buffer = self.create_buffer(label, (std::mem::size_of::<T>() * data.len()) as u64, usage);
-        self.queue.write_buffer(&buffer, 0, bytemuck::cast_slice(data));
+        let buffer = self.create_buffer(label, std::mem::size_of_val(data) as u64, usage);
+        self.queue
+            .write_buffer(&buffer, 0, bytemuck::cast_slice(data));
         buffer
     }
 
@@ -157,20 +156,27 @@ impl ComputeContext {
 
         let pipeline_layout_label = label.map(|l| format!("{l} Pipeline Layout"));
         let pipeline_layout_label_ref = pipeline_layout_label.as_deref();
-        let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: pipeline_layout_label_ref,
-            bind_group_layouts: &bind_group_layouts.iter().map(|&lg| Some(lg)).collect::<Vec<_>>(),
-            immediate_size: 0,
-        });
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: pipeline_layout_label_ref,
+                bind_group_layouts: &bind_group_layouts
+                    .iter()
+                    .map(|&lg| Some(lg))
+                    .collect::<Vec<_>>(),
+                immediate_size: 0,
+            });
 
-        let compute_pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label,
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let compute_pipeline =
+            self.device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label,
+                    layout: Some(&pipeline_layout),
+                    module: &shader,
+                    entry_point: Some("main"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
 
         Ok(compute_pipeline)
     }
@@ -190,10 +196,8 @@ impl ComputeContext {
         label: Option<&str>,
         entries: &[wgpu::BindGroupLayoutEntry],
     ) -> wgpu::BindGroupLayout {
-        self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label,
-            entries,
-        })
+        self.device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label, entries })
     }
 
     /// Creates a bind group.

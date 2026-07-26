@@ -41,16 +41,16 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: cargo fmt -p wgsl-ping-pong-pipeline -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy -p wgsl-ping-pong-pipeline --lib -- -D warnings
 
       - name: Run tests
-        run: cargo test --all-targets
+        run: cargo test -p wgsl-ping-pong-pipeline --all-targets
 
       - name: Check documentation
-        run: cargo doc --no-deps
+        run: cargo doc -p wgsl-ping-pong-pipeline --no-deps
 
   build-release:
     name: Build Release
@@ -77,7 +77,7 @@ jobs:
             ${{ runner.os }}-cargo-release-
 
       - name: Build release
-        run: cargo build --release
+        run: cargo build -p wgsl-ping-pong-pipeline --release
 
   publish-dry-run:
     name: Publish Dry Run

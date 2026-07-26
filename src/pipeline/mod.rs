@@ -1,7 +1,7 @@
 //! Pipeline implementation with isolated per-stage ping-pong buffers.
 
-use crate::wgpu_utils::{ComputeContext, stage_buffer_usages, readback_buffer_usages};
-use anyhow::{bail, Result};
+use crate::wgpu_utils::{ComputeContext, readback_buffer_usages, stage_buffer_usages};
+use anyhow::{Result, bail};
 use bytemuck::Pod;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use std::sync::Arc;
 pub mod pipeline_stage;
 pub mod variable_size;
 pub use pipeline_stage::{PipelineStage, StageConfig};
-pub use variable_size::{VariableSizePipeline, VariableSizePipelineBuilder, StageSizeConfig};
+pub use variable_size::{StageSizeConfig, VariableSizePipeline, VariableSizePipelineBuilder};
 
 /// Element size in bytes for f32.
 pub const F32_SIZE: usize = 4;
@@ -32,7 +32,12 @@ pub struct Stage {
 
 impl Stage {
     /// Creates a new stage.
-    pub fn new(name: impl Into<String>, wgsl: impl Into<String>, vector_dim: usize, batch_size: usize) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        wgsl: impl Into<String>,
+        vector_dim: usize,
+        batch_size: usize,
+    ) -> Self {
         Self {
             name: name.into(),
             wgsl: wgsl.into(),
@@ -77,8 +82,7 @@ fn create_identity_shader(_vector_dim: usize) -> String {
     // For identity, we just copy all elements from input to output
     // The data is laid out as a flat array of f32 values
     // So we need to divide idx by vector_dim to get the element index
-    format!(
-        r#"
+    r#"
 @group(0) @binding(0)
 var<storage, read> input: array<f32>;
 
@@ -86,13 +90,13 @@ var<storage, read> input: array<f32>;
 var<storage, read_write> output: array<f32>;
 
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let idx = id.x;
-    if (idx >= arrayLength(&input)) {{ return; }}
+    if (idx >= arrayLength(&input)) { return; }
     output[idx] = input[idx];
-}}
+}
 "#
-    )
+    .to_string()
 }
 
 /// Pipeline builder.
@@ -121,14 +125,22 @@ impl<T> PipelineBuilder<T> {
         self.stages.push(StageConfig::Custom { stage, tag: None });
         self
     }
-    
+
     pub fn pipe_config(mut self, config: StageConfig<T>) -> Self {
         self.stages.push(config);
         self
     }
 
-    pub fn identity(mut self, name: impl Into<String>, vector_dim: usize, batch_size: usize) -> Self {
-        self.stages.push(StageConfig::Standard { stage: Stage::identity(name, vector_dim, batch_size), tag: None });
+    pub fn identity(
+        mut self,
+        name: impl Into<String>,
+        vector_dim: usize,
+        batch_size: usize,
+    ) -> Self {
+        self.stages.push(StageConfig::Standard {
+            stage: Stage::identity(name, vector_dim, batch_size),
+            tag: None,
+        });
         self
     }
 
@@ -169,7 +181,7 @@ pub struct Pipeline<T> {
     /// But we store them as [[wgpu::BindGroup; 2]; 2] where:
     /// - First index: input buffer index (0 or 1)
     /// - Second index: output buffer state (0 or 1)
-    /// Only used for standard stages; custom stages create their own bind groups
+    ///   Only used for standard stages; custom stages create their own bind groups
     bind_groups: Vec<Option<[[wgpu::BindGroup; 2]; 2]>>,
     /// Current output buffer index for each stage (0 or 1 in its pair)
     current_output_indices: Vec<usize>,
@@ -196,6 +208,7 @@ pub struct Pipeline<T> {
 }
 
 impl<T> Pipeline<T> {
+    #[allow(clippy::new_ret_no_self)]
     pub fn new() -> PipelineBuilder<T> {
         PipelineBuilder::new()
     }
@@ -220,13 +233,17 @@ impl<T> Pipeline<T> {
                 if stage.vector_dim() != vector_dim {
                     bail!(
                         "All stages must have the same vector dimension. Stage '{}' has {}, expected {}",
-                        stage.name(), stage.vector_dim(), vector_dim
+                        stage.name(),
+                        stage.vector_dim(),
+                        vector_dim
                     );
                 }
                 if stage.batch_size() != batch_size {
                     bail!(
                         "All stages must have the same batch size. Stage '{}' has {}, expected {}",
-                        stage.name(), stage.batch_size(), batch_size
+                        stage.name(),
+                        stage.batch_size(),
+                        batch_size
                     );
                 }
             }
@@ -244,7 +261,7 @@ impl<T> Pipeline<T> {
         // Create all buffers: 2 input buffers + 2 output buffers per stage
         let num_buffers = 2 + 2 * stage_configs.len();
         let mut buffers = Vec::with_capacity(num_buffers);
-        
+
         // Input buffers for stage 0 (ping-pong pair)
         buffers.push(Arc::new(context.create_buffer(
             Some("Pipeline Input Buffer A"),
@@ -258,7 +275,7 @@ impl<T> Pipeline<T> {
         )));
 
         // Output buffers for each stage
-        for (_i, stage_config) in stage_configs.iter().enumerate() {
+        for stage_config in stage_configs.iter() {
             buffers.push(Arc::new(context.create_buffer(
                 Some(&format!("Stage {} Output Buffer A", stage_config.name())),
                 buffer_size,
@@ -272,20 +289,22 @@ impl<T> Pipeline<T> {
         }
 
         // Create compute pipelines and bind group layouts for each stage
-        let mut compute_pipelines: Vec<Option<Arc<wgpu::ComputePipeline>>> = Vec::with_capacity(stage_configs.len());
+        let mut compute_pipelines: Vec<Option<Arc<wgpu::ComputePipeline>>> =
+            Vec::with_capacity(stage_configs.len());
         let mut bind_group_layouts = Vec::with_capacity(stage_configs.len());
         let mut stage_names = Vec::with_capacity(stage_configs.len());
-        let mut bind_groups: Vec<Option<[wgpu::BindGroup; 2]>> = Vec::with_capacity(stage_configs.len());
-        
+        let mut bind_groups: Vec<Option<[wgpu::BindGroup; 2]>> =
+            Vec::with_capacity(stage_configs.len());
+
         // Initialize custom stages in place (we take ownership of stage_configs)
         for stage_config in &mut stage_configs {
-            if let StageConfig::Custom { stage, .. } = stage_config {
-                if stage.requires_initialization() {
-                    stage.initialize(&context)?;
-                }
+            if let StageConfig::Custom { stage, .. } = stage_config
+                && stage.requires_initialization()
+            {
+                stage.initialize(&context)?;
             }
         }
-        
+
         for stage_config in &stage_configs {
             let name = stage_config.name().to_string();
             let bgl = match stage_config {
@@ -306,7 +325,7 @@ impl<T> Pipeline<T> {
                     Arc::clone(&default_bind_group_layout)
                 }
             };
-            
+
             let pipeline = match stage_config {
                 StageConfig::Standard { stage, .. } => {
                     Some(Arc::new(context.create_compute_pipeline(
@@ -320,7 +339,7 @@ impl<T> Pipeline<T> {
                     None
                 }
             };
-            
+
             compute_pipelines.push(pipeline);
             bind_group_layouts.push(bgl);
             bind_groups.push(None); // Will be filled later for standard stages
@@ -358,7 +377,12 @@ impl<T> Pipeline<T> {
     /// was writing to in the PREVIOUS tick.
     ///
     /// This is used for standard stages during pipeline creation.
-    fn create_bind_group_for_stage(&self, stage_idx: usize, input_buffer_variant: usize, output_state: usize) -> wgpu::BindGroup {
+    fn create_bind_group_for_stage(
+        &self,
+        stage_idx: usize,
+        input_buffer_variant: usize,
+        output_state: usize,
+    ) -> wgpu::BindGroup {
         let bgl = &self.bind_group_layouts[stage_idx];
         let input_buffer_idx = if stage_idx == 0 {
             // Stage 0: input_buffer_variant selects between the 2 input buffers
@@ -376,7 +400,8 @@ impl<T> Pipeline<T> {
         // Check the number of bindings by examining the entries
         // We need to access the BindGroupLayout's entries, but it's not directly accessible
         // For now, we'll use a heuristic: check if this stage has a custom layout
-        let stage_has_custom_layout = Arc::as_ptr(&self.bind_group_layouts[stage_idx]) != Arc::as_ptr(&self.bind_group_layout);
+        let stage_has_custom_layout = Arc::as_ptr(&self.bind_group_layouts[stage_idx])
+            != Arc::as_ptr(&self.bind_group_layout);
         let num_bindings = if stage_has_custom_layout {
             // For custom layouts, we need to determine the number of bindings
             // For now, we'll assume multiply stages have 3 bindings
@@ -385,7 +410,7 @@ impl<T> Pipeline<T> {
         } else {
             2
         };
-        
+
         let entries: Vec<wgpu::BindGroupEntry> = match num_bindings {
             2 => vec![
                 wgpu::BindGroupEntry {
@@ -427,31 +452,35 @@ impl<T> Pipeline<T> {
         };
 
         self.context.create_bind_group(
-            Some(&format!("Stage {} BG Input {} Output {}", self.stage_names[stage_idx], input_buffer_variant, output_state)),
+            Some(&format!(
+                "Stage {} BG Input {} Output {}",
+                self.stage_names[stage_idx], input_buffer_variant, output_state
+            )),
             bgl,
             &entries,
         )
     }
 
     pub async fn tick(&mut self, tag: Option<T>) -> Result<()> {
-        let mut encoder = self.context.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor {
-                label: Some(&format!("Tick {} Encoder", self.tick_count)),
-            },
-        );
+        let mut encoder =
+            self.context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some(&format!("Tick {} Encoder", self.tick_count)),
+                });
 
         // Process tag flow through pipeline
         // Insert tag into first stage, get its previous tag
         // Then forward that tag to next stage, and so on
         // In staggered mode, data takes N ticks to propagate through N stages
-        
+
         // Forward the tag through all stages to implement a delay line
         // Each stage holds its tag for one tick, then passes it to the next stage
         let mut current_tag: Option<T> = tag;
         for i in 0..self.stage_configs.len() {
             current_tag = self.stage_configs[i].forward_tag(current_tag);
         }
-        
+
         // After forwarding through all stages, get the tag from the last stage
         // This is the tag that has propagated through the pipeline (delayed by N stages)
         // We take ownership to avoid cloning
@@ -466,7 +495,7 @@ impl<T> Pipeline<T> {
 
         for i in 0..self.stage_configs.len() {
             let state = self.current_output_indices[i];
-            
+
             // Calculate input buffer index for this stage
             // In immediate mode, all stages process in a single tick in sequence
             // Stage 0 reads from the input buffer, each subsequent stage reads from the previous stage's output buffer
@@ -479,9 +508,9 @@ impl<T> Pipeline<T> {
                 // So we read from that same buffer
                 2 + 2 * (i - 1) + self.current_output_indices[i - 1]
             };
-            
+
             let output_buffer_idx = 2 + 2 * i + state;
-            
+
             // Get the submission metadata from the input buffer and propagate to stage
             // If no metadata is available, use default values
             let metadata = self.buffer_submission_metadata[input_buffer_idx];
@@ -494,11 +523,11 @@ impl<T> Pipeline<T> {
                     (self.batch_size, self.default_n)
                 }
             };
-            
+
             // Update the stage with the actual elements and n from its input submission
             self.stage_configs[i].update_actual_total_elements(actual_elements)?;
             self.stage_configs[i].update_n(n)?;
-            
+
             match &self.stage_configs[i] {
                 StageConfig::Standard { .. } => {
                     // Standard stage: use compute pipeline and bind groups
@@ -506,11 +535,19 @@ impl<T> Pipeline<T> {
                         // Lazy initialization of bind groups for standard stages
                         // We need 4 bind groups: 2 input variants × 2 output states
                         if self.bind_groups[i].is_none() {
-                            let bgs = [[self.create_bind_group_for_stage(i, 0, 0), self.create_bind_group_for_stage(i, 0, 1)],
-                                       [self.create_bind_group_for_stage(i, 1, 0), self.create_bind_group_for_stage(i, 1, 1)]];
+                            let bgs = [
+                                [
+                                    self.create_bind_group_for_stage(i, 0, 0),
+                                    self.create_bind_group_for_stage(i, 0, 1),
+                                ],
+                                [
+                                    self.create_bind_group_for_stage(i, 1, 0),
+                                    self.create_bind_group_for_stage(i, 1, 1),
+                                ],
+                            ];
                             self.bind_groups[i] = Some(bgs);
                         }
-                        
+
                         // Select the appropriate bind group based on input buffer variant and output state
                         let (input_buffer_variant, output_state) = if i == 0 {
                             // For stage 0, input_buffer_variant is determined by current_input_write_index
@@ -523,10 +560,14 @@ impl<T> Pipeline<T> {
                             // So the previous stage wrote to buffer (1 - state)
                             (1 - state, state)
                         };
-                        let bind_group = &self.bind_groups[i].as_ref().unwrap()[input_buffer_variant][output_state];
+                        let bind_group = &self.bind_groups[i].as_ref().unwrap()
+                            [input_buffer_variant][output_state];
 
                         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some(&format!("Stage {} Pass Tick {}", self.stage_names[i], self.tick_count)),
+                            label: Some(&format!(
+                                "Stage {} Pass Tick {}",
+                                self.stage_names[i], self.tick_count
+                            )),
                             timestamp_writes: None,
                         });
 
@@ -534,7 +575,7 @@ impl<T> Pipeline<T> {
                         pass.set_bind_group(0, bind_group, &[]);
 
                         let workgroup_size = 64u32;
-                        let dispatch_count = (actual_elements as u32 + workgroup_size - 1) / workgroup_size;
+                        let dispatch_count = (actual_elements as u32).div_ceil(workgroup_size);
                         pass.dispatch_workgroups(dispatch_count, 1, 1);
                     }
                 }
@@ -543,15 +584,16 @@ impl<T> Pipeline<T> {
                     // Reuse input_buffer_idx calculated above
                     let input_buffer = &self.buffers[input_buffer_idx];
                     let output_buffer = &self.buffers[output_buffer_idx];
-                    
+
                     stage.encode(&mut encoder, input_buffer, output_buffer, &self.side_inputs)?
                 }
             }
-            
+
             // Propagate submission metadata to output buffer
             // The output buffer is being written with data from the input buffer in this tick,
             // so it should have the same metadata as the input buffer
-            self.buffer_submission_metadata[output_buffer_idx] = self.buffer_submission_metadata[input_buffer_idx];
+            self.buffer_submission_metadata[output_buffer_idx] =
+                self.buffer_submission_metadata[input_buffer_idx];
         }
 
         // Flip all output indices
@@ -567,7 +609,7 @@ impl<T> Pipeline<T> {
     }
 
     pub fn is_empty(&self) -> bool {
-        if !self.last_output_tag.is_none() {
+        if self.last_output_tag.is_some() {
             return false;
         }
         for i in 0..self.stage_configs.len() {
@@ -583,21 +625,27 @@ impl<T> Pipeline<T> {
     pub fn set_default_n(&mut self, n: usize) {
         self.default_n = n;
     }
-    
+
     /// Sets the submission metadata for the next input buffer to be written.
     /// This allows tracking submission sizes through the pipeline without padding.
     /// The metadata will be set for the buffer that will be written to by the next write_input() call.
-    /// 
+    ///
     /// # Arguments
     /// * `actual_total_elements` - Total number of Complex elements in the submission
     /// * `n` - FFT size for this submission
     /// * `batch_size` - Batch size for this submission
-    pub fn set_input_submission_metadata(&mut self, actual_total_elements: usize, n: usize, batch_size: usize) {
+    pub fn set_input_submission_metadata(
+        &mut self,
+        actual_total_elements: usize,
+        n: usize,
+        batch_size: usize,
+    ) {
         // Set metadata for the buffer that will be written to next
         // (current_input_write_index points to the next buffer to write to)
-        self.buffer_submission_metadata[self.current_input_write_index] = Some((actual_total_elements, n, batch_size));
+        self.buffer_submission_metadata[self.current_input_write_index] =
+            Some((actual_total_elements, n, batch_size));
     }
-    
+
     /// Clears all buffer metadata.
     /// This should be called when the pipeline is idle to avoid interference with new submissions.
     pub fn clear_all_buffer_metadata(&mut self) {
@@ -607,16 +655,19 @@ impl<T> Pipeline<T> {
     }
 
     pub async fn write_input<D: Pod>(&mut self, data: &[D]) -> Result<()> {
-        let actual_byte_size = data.len() * std::mem::size_of::<D>();
+        let actual_byte_size = std::mem::size_of_val(data);
         if actual_byte_size == 0 {
             bail!("Input data cannot be empty");
         }
 
         let element_size = self.vector_dim * F32_SIZE;
-        if actual_byte_size % element_size != 0 {
+        if !actual_byte_size.is_multiple_of(element_size) {
             bail!(
                 "Input byte size {} is not a multiple of element size {} (vector_dim {} * F32_SIZE {})",
-                actual_byte_size, element_size, self.vector_dim, F32_SIZE
+                actual_byte_size,
+                element_size,
+                self.vector_dim,
+                F32_SIZE
             );
         }
 
@@ -629,13 +680,16 @@ impl<T> Pipeline<T> {
         }
 
         // Write to the current input buffer
-        self.context.queue.write_buffer(&self.buffers[write_idx], 0, bytemuck::cast_slice(data));
-        
+        self.context
+            .queue
+            .write_buffer(&self.buffers[write_idx], 0, bytemuck::cast_slice(data));
+
         let custom_n = match self.buffer_submission_metadata[write_idx] {
             Some((_, custom_n, _)) => custom_n,
             None => self.default_n,
         };
-        self.buffer_submission_metadata[write_idx] = Some((actual_batch_size, custom_n, actual_batch_size));
+        self.buffer_submission_metadata[write_idx] =
+            Some((actual_batch_size, custom_n, actual_batch_size));
 
         // Toggle write index for next submission
         self.current_input_write_index = 1 - write_idx;
@@ -659,17 +713,15 @@ impl<T> Pipeline<T> {
         // Because we flipped after dispatch, the current_output_indices points to the NEXT buffer to write to
         // So the last written buffer is 1 - current_output_indices[num_stages-1]
         // Note: We now have 2 input buffers, so stage outputs start at index 2
-        let last_output_buffer_idx = 2 + 2 * (num_stages - 1) + (1 - self.current_output_indices[num_stages - 1]);
+        let last_output_buffer_idx =
+            2 + 2 * (num_stages - 1) + (1 - self.current_output_indices[num_stages - 1]);
         let read_buffer = &self.buffers[last_output_buffer_idx];
 
         let element_count = match self.buffer_submission_metadata[last_output_buffer_idx] {
             Some((actual_elements, _n, _batch_size)) => actual_elements * self.vector_dim,
             None => self.batch_size * self.vector_dim,
         };
-        let buffer_size = std::cmp::min(
-            (element_count * F32_SIZE) as u64,
-            read_buffer.size(),
-        );
+        let buffer_size = std::cmp::min((element_count * F32_SIZE) as u64, read_buffer.size());
         let element_count = buffer_size as usize / F32_SIZE;
 
         let readback_buffer = self.context.create_buffer(
@@ -678,12 +730,12 @@ impl<T> Pipeline<T> {
             readback_buffer_usages(),
         );
 
-        let mut encoder = self
-            .context
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Readback Encoder"),
-            });
+        let mut encoder =
+            self.context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Readback Encoder"),
+                });
 
         encoder.copy_buffer_to_buffer(read_buffer, 0, &readback_buffer, 0, buffer_size);
         self.context.queue.submit(Some(encoder.finish()));
@@ -695,9 +747,12 @@ impl<T> Pipeline<T> {
             sender.send(result).unwrap();
         });
         use wgpu::PollType;
-        self.context.device.poll(PollType::Wait { submission_index: None, timeout: None })?;
+        self.context.device.poll(PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })?;
 
-        let _result = receiver
+        receiver
             .recv()
             .map_err(|_| anyhow::anyhow!("Channel closed"))??;
         let data: &[u8] = &buffer_slice.get_mapped_range();
@@ -723,15 +778,16 @@ impl<T> Pipeline<T> {
         let new_buffer_size = new_batch_size as u64 * element_size as u64;
         let usages = stage_buffer_usages();
 
-        let mut encoder = self.context.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor {
-                label: Some("Resize Encoder"),
-            },
-        );
+        let mut encoder =
+            self.context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Resize Encoder"),
+                });
 
         // Resize all buffers
         let mut new_buffers = Vec::with_capacity(self.buffers.len());
-        
+
         for (i, old_buffer) in self.buffers.iter().enumerate() {
             let new_buffer = Arc::new(self.context.create_buffer(
                 Some(&format!("Buffer {} Resized", i)),
@@ -765,61 +821,66 @@ impl<T> Pipeline<T> {
 
         Ok(())
     }
-    
+
     /// Resizes the pipeline to handle new dimensions, including notifying custom stages.
-    /// 
+    ///
     /// This is a more comprehensive resize that can handle both batch_size and vector_dim changes.
     /// It will resize all buffers and notify custom stages that support dynamic resizing.
-    /// 
+    ///
     /// # Arguments
     /// * `new_batch_size` - The new batch size (number of elements/vectors)
     /// * `new_vector_dim` - The new vector dimension (2 for complex numbers, etc.)
-    /// 
+    ///
     /// # Returns
     /// A Result indicating success or failure of the resize operation.
-    pub async fn resize_dynamic(&mut self, new_batch_size: usize, new_vector_dim: usize) -> Result<()> {
+    pub async fn resize_dynamic(
+        &mut self,
+        new_batch_size: usize,
+        new_vector_dim: usize,
+    ) -> Result<()> {
         if new_batch_size == 0 {
             bail!("Batch size must be at least 1");
         }
         if new_vector_dim == 0 {
             bail!("Vector dimension must be at least 1");
         }
-        
+
         // If only batch size is changing, use the simpler resize method
         if new_vector_dim == self.vector_dim && new_batch_size == self.batch_size {
             return Ok(());
         }
-        
+
         // If vector dimension is changing, we need to rebuild all buffers
         let element_size = new_vector_dim * F32_SIZE;
         let new_buffer_size = new_batch_size as u64 * element_size as u64;
         let usages = stage_buffer_usages();
-        
-        let mut encoder = self.context.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor {
-                label: Some("Dynamic Resize Encoder"),
-            },
-        );
+
+        let mut encoder =
+            self.context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Dynamic Resize Encoder"),
+                });
 
         // Resize all buffers with new dimensions
         let mut new_buffers = Vec::with_capacity(self.buffers.len());
-        
+
         for (i, old_buffer) in self.buffers.iter().enumerate() {
             let new_buffer = Arc::new(self.context.create_buffer(
                 Some(&format!("Buffer {} Dynamic Resize", i)),
                 new_buffer_size,
                 usages,
             ));
-            
+
             // Try to copy as much data as possible from old buffer
             let old_element_size = self.vector_dim * F32_SIZE;
             let old_buffer_size = self.batch_size as u64 * old_element_size as u64;
             let copy_size = std::cmp::min(old_buffer_size, new_buffer_size);
-            
+
             if copy_size > 0 {
                 encoder.copy_buffer_to_buffer(old_buffer, 0, &new_buffer, 0, copy_size);
             }
-            
+
             new_buffers.push(new_buffer);
         }
 
@@ -835,7 +896,7 @@ impl<T> Pipeline<T> {
                 self.bind_groups[i] = None;
             }
         }
-        
+
         // Notify custom stages of the size change
         for stage_config in &mut self.stage_configs {
             if stage_config.supports_dynamic_resizing() {
@@ -847,7 +908,7 @@ impl<T> Pipeline<T> {
                 // we can't easily get mutable access here without significant refactoring
             }
         }
-        
+
         // Clear buffer metadata since buffer contents have been resized
         for metadata in &mut self.buffer_submission_metadata {
             *metadata = None;
@@ -855,34 +916,35 @@ impl<T> Pipeline<T> {
 
         Ok(())
     }
-    
+
     /// Resizes the pipeline and all its stages to handle new dimensions.
     /// This calls resize on all custom stages that support dynamic resizing.
-    pub async fn resize_with_stages(&mut self, new_batch_size: usize, new_vector_dim: usize) -> Result<()> {
+    pub async fn resize_with_stages(
+        &mut self,
+        new_batch_size: usize,
+        new_vector_dim: usize,
+    ) -> Result<()> {
         // First resize the buffers
         self.resize(new_batch_size).await?;
-        
+
         // Update pipeline metadata
         self.batch_size = new_batch_size;
         self.vector_dim = new_vector_dim;
-        
+
         // Notify all custom stages of the size change
         for stage_config in &mut self.stage_configs {
             if stage_config.supports_dynamic_resizing() {
                 // For custom stages, we need to call their resize method
-                match stage_config {
-                    StageConfig::Custom { stage, .. } => {
-                        // Call the stage's resize method
-                        stage.resize(new_batch_size, new_vector_dim)?;
-                    }
-                    _ => {}
+                if let StageConfig::Custom { stage, .. } = stage_config {
+                    // Call the stage's resize method
+                    stage.resize(new_batch_size, new_vector_dim)?;
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Updates the FFT size (n) parameter for all custom stages.
     ///
     /// This is used when the pipeline's FFT size changes without rebuilding.
@@ -949,7 +1011,7 @@ impl<T> Pipeline<T> {
         // Return the first input buffer (buffer 0) for backward compatibility
         &self.buffers[0]
     }
-    
+
     pub fn tick_count(&self) -> u64 {
         self.tick_count
     }
