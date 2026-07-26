@@ -34,11 +34,16 @@ impl ComputeContext {
         let instance = wgpu::Instance::default();
 
         // Request adapter with compute capability
+        // In CI environments, use fallback adapter (CPU-based software renderer)
+        let use_fallback = std::env::var("WGPU_FORCE_FALLBACK").is_ok()
+            || std::env::var("CI").is_ok()
+            || std::env::var("GITHUB_ACTIONS").is_ok();
+
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference,
                 compatible_surface: None,
-                force_fallback_adapter: false,
+                force_fallback_adapter: use_fallback,
             })
             .await
             .context("No suitable GPU adapter found")?;

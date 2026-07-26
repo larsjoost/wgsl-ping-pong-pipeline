@@ -18,6 +18,8 @@ jobs:
         rust:
           - stable
           - nightly
+    env:
+      WGPU_FORCE_FALLBACK: "1"
     steps:
       - uses: actions/checkout@v4
 
