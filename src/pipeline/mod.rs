@@ -649,9 +649,7 @@ impl<T> Pipeline<T> {
     /// Clears all buffer metadata.
     /// This should be called when the pipeline is idle to avoid interference with new submissions.
     pub fn clear_all_buffer_metadata(&mut self) {
-        for metadata in &mut self.buffer_submission_metadata {
-            *metadata = None;
-        }
+        self.buffer_submission_metadata.fill(None);
     }
 
     pub async fn write_input<D: Pod>(&mut self, data: &[D]) -> Result<()> {
@@ -910,9 +908,7 @@ impl<T> Pipeline<T> {
         }
 
         // Clear buffer metadata since buffer contents have been resized
-        for metadata in &mut self.buffer_submission_metadata {
-            *metadata = None;
-        }
+        self.buffer_submission_metadata.fill(None);
 
         Ok(())
     }
