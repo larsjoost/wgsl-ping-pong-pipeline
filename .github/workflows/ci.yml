@@ -19,7 +19,8 @@ jobs:
           - stable
           - nightly
     env:
-      WGPU_FORCE_FALLBACK: "1"
+      WGPU_BACKEND: vulkan
+      VULKAN_SDK: /usr/lib/x86_64-linux-gnu
     steps:
       - uses: actions/checkout@v4
 
@@ -30,6 +31,11 @@ jobs:
           toolchain: ${{ matrix.rust }}
           override: true
           components: rustfmt, clippy
+
+      - name: Install Vulkan and Mesa dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y vulkan-tools libvulkan-dev mesa-vulkan-drivers libgl1-mesa-dev
 
       - name: Cache dependencies
         uses: actions/cache@v3
