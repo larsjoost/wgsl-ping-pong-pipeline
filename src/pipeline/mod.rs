@@ -384,15 +384,10 @@ impl<T> Pipeline<T> {
         output_state: usize,
     ) -> wgpu::BindGroup {
         let bgl = &self.bind_group_layouts[stage_idx];
-        let input_buffer_idx = if stage_idx == 0 {
-            // Stage 0: input_buffer_variant selects between the 2 input buffers
-            input_buffer_variant
-        } else {
-            // For stage i > 0: input comes from previous stage's output
-            // input_buffer_variant is used to select between the 2 output buffers of the previous stage
-            2 + 2 * (stage_idx - 1) + input_buffer_variant
-        };
-        let output_buffer_idx = 2 + 2 * stage_idx + output_state;
+        // Buffer layout: [input_A, input_B, stage0_out_A, stage0_out_B, stage1_out_A, stage1_out_B, ...]
+        // For any stage, input buffer index = 2 * stage_idx + variant
+        let input_buffer_idx = 2 * stage_idx + input_buffer_variant;
+        let output_buffer_idx = 2 * stage_idx + 2 + output_state;
 
         // Check how many bindings this stage's layout has
         // If it has 3 bindings (like multiply stage), we need to provide 3 entries
@@ -498,18 +493,18 @@ impl<T> Pipeline<T> {
 
             // Calculate input buffer index for this stage
             // In immediate mode, all stages process in a single tick in sequence
-            // Stage 0 reads from the input buffer, each subsequent stage reads from the previous stage's output buffer
-            let input_buffer_idx = if i == 0 {
+            // Buffer layout: [input_A, input_B, stage0_out_A, stage0_out_B, stage1_out_A, stage1_out_B, ...]
+            // For any stage i, input buffer index = 2 * i + variant
+            let input_buffer_variant = if i == 0 {
                 // Stage 0 reads from the input buffer that has data
                 1 - self.current_input_write_index
             } else {
-                // In immediate mode: read from the buffer that the previous stage wrote to in the CURRENT tick
-                // The previous stage (i-1) writes to buffer: 2 + 2*(i-1) + current_output_indices[i-1]
-                // So we read from that same buffer
-                2 + 2 * (i - 1) + self.current_output_indices[i - 1]
+                // Stage i reads from the buffer that stage (i-1) wrote to in the CURRENT tick
+                self.current_output_indices[i - 1]
             };
+            let input_buffer_idx = 2 * i + input_buffer_variant;
 
-            let output_buffer_idx = 2 + 2 * i + state;
+            let output_buffer_idx = 2 * i + 2 + state;
 
             // Get the submission metadata from the input buffer and propagate to stage
             // If no metadata is available, use default values
@@ -707,12 +702,12 @@ impl<T> Pipeline<T> {
         }
 
         // Output is in the last stage's current output buffer
-        // Buffer index = 2 + 2*(num_stages-1) + (1 - current_output_indices[num_stages-1])
-        // Because we flipped after dispatch, the current_output_indices points to the NEXT buffer to write to
+        // Buffer layout: [input_A, input_B, stage0_out_A, stage0_out_B, ...]
+        // Last stage (num_stages-1) output buffer index = 2 * num_stages + (1 - current_output_indices[num_stages-1])
+        // Because we flipped after dispatch, current_output_indices points to the NEXT buffer to write to
         // So the last written buffer is 1 - current_output_indices[num_stages-1]
-        // Note: We now have 2 input buffers, so stage outputs start at index 2
         let last_output_buffer_idx =
-            2 + 2 * (num_stages - 1) + (1 - self.current_output_indices[num_stages - 1]);
+            2 * num_stages + (1 - self.current_output_indices[num_stages - 1]);
         let read_buffer = &self.buffers[last_output_buffer_idx];
 
         let element_count = match self.buffer_submission_metadata[last_output_buffer_idx] {
