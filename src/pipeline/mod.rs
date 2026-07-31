@@ -168,7 +168,10 @@ pub struct Pipeline<T> {
     vector_dim: usize,
     batch_size: usize,
     tick_count: u64,
-    /// All buffers: [input_buffer_a, input_buffer_b, stage0_out_a, stage0_out_b, stage1_out_a, stage1_out_b, ...]
+    /// All buffers: [input_A, input_B, stage0_out_A, stage0_out_B, stage1_out_A, stage1_out_B, ...]
+    /// Buffer layout grouped by set:
+    /// - Set A (read when current_set=0): indices 0, 2, 4, 6... (input_A, stage0_out_A, stage1_out_A, ...)
+    /// - Set B (read when current_set=1): indices 1, 3, 5, 7... (input_B, stage0_out_B, stage1_out_B, ...)
     /// For N stages, we need 2 input buffers + 2*N output buffers
     buffers: Vec<Arc<wgpu::Buffer>>,
     /// Compute pipelines for each stage (only for standard stages)
@@ -183,10 +186,9 @@ pub struct Pipeline<T> {
     /// - Second index: output buffer state (0 or 1)
     ///   Only used for standard stages; custom stages create their own bind groups
     bind_groups: Vec<Option<[[wgpu::BindGroup; 2]; 2]>>,
-    /// Current output buffer index for each stage (0 or 1 in its pair)
-    current_output_indices: Vec<usize>,
-    /// Current input buffer index to write to (0 or 1) for ping-pong input
-    current_input_write_index: usize,
+    /// Current buffer set to read from (0 or 1)
+    /// All stages read from buffers in set `current_set` and write to buffers in set `1 - current_set`
+    current_set: usize,
     /// Stage names
     stage_names: Vec<String>,
     /// Stage configurations (standard or custom)
@@ -357,8 +359,7 @@ impl<T> Pipeline<T> {
             compute_pipelines,
             bind_group_layouts,
             bind_groups: vec![None; stage_configs.len()], // Will be initialized lazily as 2x2 arrays
-            current_output_indices: vec![0; stage_configs.len()],
-            current_input_write_index: 0,
+            current_set: 0,
             stage_names,
             stage_configs,
             side_inputs: std::collections::HashMap::new(),
@@ -489,22 +490,12 @@ impl<T> Pipeline<T> {
         }
 
         for i in 0..self.stage_configs.len() {
-            let state = self.current_output_indices[i];
-
-            // Calculate input buffer index for this stage
-            // In immediate mode, all stages process in a single tick in sequence
-            // Buffer layout: [input_A, input_B, stage0_out_A, stage0_out_B, stage1_out_A, stage1_out_B, ...]
-            // For any stage i, input buffer index = 2 * i + variant
-            let input_buffer_variant = if i == 0 {
-                // Stage 0 reads from the input buffer that has data
-                1 - self.current_input_write_index
-            } else {
-                // Stage i reads from the buffer that stage (i-1) wrote to in the CURRENT tick
-                self.current_output_indices[i - 1]
-            };
-            let input_buffer_idx = 2 * i + input_buffer_variant;
-
-            let output_buffer_idx = 2 * i + 2 + state;
+            // Global ping-pong: all stages read from set current_set and write to set (1 - current_set)
+            // Buffer layout grouped by set:
+            // - Set A (current_set=0): indices 0, 2, 4, 6... (input_A, stage0_out_A, stage1_out_A, ...)
+            // - Set B (current_set=1): indices 1, 3, 5, 7... (input_B, stage0_out_B, stage1_out_B, ...)
+            let input_buffer_idx = 2 * i + self.current_set;
+            let output_buffer_idx = 2 * i + 2 + (1 - self.current_set);
 
             // Get the submission metadata from the input buffer and propagate to stage
             // If no metadata is available, use default values
@@ -544,17 +535,10 @@ impl<T> Pipeline<T> {
                         }
 
                         // Select the appropriate bind group based on input buffer variant and output state
-                        let (input_buffer_variant, output_state) = if i == 0 {
-                            // For stage 0, input_buffer_variant is determined by current_input_write_index
-                            // The buffer with data is 1 - current_input_write_index
-                            (1 - self.current_input_write_index, state)
-                        } else {
-                            // For other stages, input_buffer_variant is determined by staggering
-                            // At the start of tick, state = the buffer index this stage will write to
-                            // In the previous tick, the previous stage had state = 1 - state
-                            // So the previous stage wrote to buffer (1 - state)
-                            (1 - state, state)
-                        };
+                        // In global ping-pong mode, all stages use the same current_set for input
+                        // and write to (1 - current_set) for output
+                        let input_buffer_variant = self.current_set;
+                        let output_state = 1 - self.current_set;
                         let bind_group = &self.bind_groups[i].as_ref().unwrap()
                             [input_buffer_variant][output_state];
 
@@ -576,7 +560,6 @@ impl<T> Pipeline<T> {
                 }
                 StageConfig::Custom { stage, .. } => {
                     // Custom stage: call its encode method
-                    // Reuse input_buffer_idx calculated above
                     let input_buffer = &self.buffers[input_buffer_idx];
                     let output_buffer = &self.buffers[output_buffer_idx];
 
@@ -591,10 +574,8 @@ impl<T> Pipeline<T> {
                 self.buffer_submission_metadata[input_buffer_idx];
         }
 
-        // Flip all output indices
-        for i in 0..self.current_output_indices.len() {
-            self.current_output_indices[i] = 1 - self.current_output_indices[i];
-        }
+        // Flip the current set for the next tick
+        self.current_set = 1 - self.current_set;
 
         self.context.queue.submit(Some(encoder.finish()));
         self.context.device_poll()?;
@@ -621,9 +602,9 @@ impl<T> Pipeline<T> {
         self.default_n = n;
     }
 
-    /// Sets the submission metadata for the next input buffer to be written.
+    /// Sets the submission metadata for the input buffer in the current set.
     /// This allows tracking submission sizes through the pipeline without padding.
-    /// The metadata will be set for the buffer that will be written to by the next write_input() call.
+    /// The metadata will be set for the buffer that will be read by Stage 0 in the current tick.
     ///
     /// # Arguments
     /// * `actual_total_elements` - Total number of Complex elements in the submission
@@ -635,9 +616,9 @@ impl<T> Pipeline<T> {
         n: usize,
         batch_size: usize,
     ) {
-        // Set metadata for the buffer that will be written to next
-        // (current_input_write_index points to the next buffer to write to)
-        self.buffer_submission_metadata[self.current_input_write_index] =
+        // Set metadata for the input buffer in the current set
+        // (current_set points to the buffer that Stage 0 will read from)
+        self.buffer_submission_metadata[self.current_set] =
             Some((actual_total_elements, n, batch_size));
     }
 
@@ -665,7 +646,9 @@ impl<T> Pipeline<T> {
         }
 
         let actual_batch_size = actual_byte_size / element_size;
-        let write_idx = self.current_input_write_index;
+        // Write to the input buffer that will be read by Stage 0 in the current tick
+        // Stage 0 reads from buffer `current_set` (either 0 or 1)
+        let write_idx = self.current_set;
 
         if actual_byte_size as u64 > self.buffers[write_idx].size() {
             let new_batch_size = std::cmp::max(actual_batch_size, self.batch_size);
@@ -684,9 +667,6 @@ impl<T> Pipeline<T> {
         self.buffer_submission_metadata[write_idx] =
             Some((actual_batch_size, custom_n, actual_batch_size));
 
-        // Toggle write index for next submission
-        self.current_input_write_index = 1 - write_idx;
-
         Ok(())
     }
 
@@ -702,12 +682,17 @@ impl<T> Pipeline<T> {
         }
 
         // Output is in the last stage's current output buffer
-        // Buffer layout: [input_A, input_B, stage0_out_A, stage0_out_B, ...]
-        // Last stage (num_stages-1) output buffer index = 2 * num_stages + (1 - current_output_indices[num_stages-1])
-        // Because we flipped after dispatch, current_output_indices points to the NEXT buffer to write to
-        // So the last written buffer is 1 - current_output_indices[num_stages-1]
-        let last_output_buffer_idx =
-            2 * num_stages + (1 - self.current_output_indices[num_stages - 1]);
+        // Buffer layout: [input_A, input_B, stage0_out_A, stage0_out_B, stage1_out_A, stage1_out_B, ...]
+        // With global ping-pong:
+        // - Last stage (num_stages-1) reads from buffer 2*(num_stages-1) + current_set
+        // - Last stage writes to buffer 2*(num_stages-1) + 2 + (1 - current_set) = 2*num_stages + (1 - current_set)
+        // But we flipped current_set after the tick, so the last written buffer is:
+        // 2*num_stages + current_set (because current_set was flipped)
+        // Wait, let's think again:
+        // During the tick (before flip): current_set = X, last stage writes to 2*(n-1) + 2 + (1-X) = 2*n + (1-X)
+        // After flip: current_set = 1 - X
+        // So the last written buffer is 2*n + (1-X) = 2*n + current_set
+        let last_output_buffer_idx = 2 * num_stages + self.current_set;
         let read_buffer = &self.buffers[last_output_buffer_idx];
 
         let element_count = match self.buffer_submission_metadata[last_output_buffer_idx] {

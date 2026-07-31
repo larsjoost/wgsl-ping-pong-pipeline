@@ -101,9 +101,10 @@ pub struct VariableSizePipeline<T> {
     tick_count: u64,
     /// Stage configurations with their size requirements
     stage_configs: Vec<StageSizeConfig<T>>,
-    /// All buffers: [stage0_input_a, stage0_input_b, stage0_out_a, stage0_out_b, stage1_out_a, stage1_out_b, ...]
-    /// Stage i input buffers are at indices 0-1 (shared) or aliased from previous stage output
-    /// Stage i output buffers are at indices 2 + 2*i and 2 + 2*i + 1
+    /// All buffers: [input_A, input_B, stage0_out_A, stage0_out_B, stage1_out_A, stage1_out_B, ...]
+    /// Buffer layout grouped by set:
+    /// - Set A (read when current_set=0): indices 0, 2, 4, 6... (input_A, stage0_out_A, stage1_out_A, ...)
+    /// - Set B (read when current_set=1): indices 1, 3, 5, 7... (input_B, stage0_out_B, stage1_out_B, ...)
     buffers: Vec<Arc<wgpu::Buffer>>,
     /// Compute pipelines for standard stages
     compute_pipelines: Vec<Option<Arc<wgpu::ComputePipeline>>>,
@@ -111,10 +112,9 @@ pub struct VariableSizePipeline<T> {
     bind_group_layouts: Vec<Arc<wgpu::BindGroupLayout>>,
     /// Bind groups for standard stages: [[input_variant][output_state]]
     bind_groups: Vec<Option<[[wgpu::BindGroup; 2]; 2]>>,
-    /// Current output buffer index for each stage (0 or 1)
-    current_output_indices: Vec<usize>,
-    /// Current input buffer index to write to (0 or 1)
-    current_input_write_index: usize,
+    /// Current buffer set to read from (0 or 1)
+    /// All stages read from buffers in set `current_set` and write to buffers in set `1 - current_set`
+    current_set: usize,
     /// Side input buffers
     side_inputs: HashMap<String, Arc<wgpu::Buffer>>,
     /// Last output tag
@@ -168,22 +168,22 @@ impl<T> VariableSizePipeline<T> {
         }
 
         // Determine which buffer to resize (only ONE from the ping-pong pair)
-        // We resize the buffer that is NOT currently being written to
+        // We resize the buffer that is NOT currently being read from
         let buf_idx = if stage_idx == 0 {
-            // Input buffers: resize the one NOT being written to
-            // current_input_write_index points to the next buffer to write to
-            // So the other buffer (1 - current_input_write_index) is safe to resize
+            // Input buffers: resize the one NOT in the current set
+            // current_set determines which input buffer is being read
+            // So the other buffer (1 - current_set) is safe to resize
             self.stage_configs[0].output_batch_size = new_batch_size;
-            1 - self.current_input_write_index
+            1 - self.current_set
         } else {
             // Output buffers for stage (stage_idx - 1)
             // Buffer layout: stage i output buffers are at [2*i+2, 2*i+3]
+            // With global ping-pong, stage i reads from set current_set and writes to set (1 - current_set)
+            // So stage (stage_idx-1) writes to buffer 2*(stage_idx-1) + 2 + (1 - current_set) = 2*stage_idx + (1 - current_set)
+            // The buffer NOT being written to (safe to resize) is 2*stage_idx + current_set
             let stage_config = &mut self.stage_configs[stage_idx - 1];
             stage_config.output_batch_size = new_batch_size;
-            // Resize the buffer that is NOT the current output target
-            // current_output_indices[stage_idx-1] is the current write target
-            // So resize the other one: 1 - current_output_indices[stage_idx-1]
-            2 * stage_idx + (1 - self.current_output_indices[stage_idx - 1])
+            2 * stage_idx + self.current_set
         };
 
         let element_size = self.stage_configs[0].element_size(); // All stages have same vector_dim
@@ -378,7 +378,9 @@ impl<T> VariableSizePipeline<T> {
         }
 
         let actual_batch_size = actual_byte_size / element_size;
-        let write_idx = self.current_input_write_index;
+        // Write to the input buffer that will be read by Stage 0 in the current tick
+        // Stage 0 reads from buffer `current_set` (either 0 or 1)
+        let write_idx = self.current_set;
 
         if actual_byte_size as u64 > self.buffers[write_idx].size() {
             self.resize_stage(0, actual_batch_size).await?;
@@ -394,8 +396,6 @@ impl<T> VariableSizePipeline<T> {
         };
         self.buffer_submission_metadata[write_idx] =
             Some((actual_batch_size, custom_n, actual_batch_size));
-
-        self.current_input_write_index = 1 - write_idx;
 
         Ok(())
     }
@@ -430,24 +430,15 @@ impl<T> VariableSizePipeline<T> {
             self.last_output_tag = None;
         }
 
-        // Process each stage
+        // Process each stage with global ping-pong
         for i in 0..self.stage_configs.len() {
-            let state = self.current_output_indices[i];
 
-            // Calculate input buffer index
-            // In immediate mode, all stages process in a single tick
-            // Buffer layout: [input_A, input_B, stage0_out_A, stage0_out_B, stage1_out_A, stage1_out_B, ...]
-            // For any stage i, input buffer index = 2 * i + variant
-            // Stage 0 reads from the input buffer, subsequent stages read from previous stage's current output
-            let input_buffer_variant = if i == 0 {
-                1 - self.current_input_write_index
-            } else {
-                // Read from the buffer that the previous stage is writing to in THIS tick
-                self.current_output_indices[i - 1]
-            };
-            let input_buffer_idx = 2 * i + input_buffer_variant;
-
-            let output_buffer_idx = 2 * i + 2 + state;
+            // Global ping-pong: all stages read from set current_set and write to set (1 - current_set)
+            // Buffer layout grouped by set:
+            // - Set A (current_set=0): indices 0, 2, 4, 6... (input_A, stage0_out_A, stage1_out_A, ...)
+            // - Set B (current_set=1): indices 1, 3, 5, 7... (input_B, stage0_out_B, stage1_out_B, ...)
+            let input_buffer_idx = 2 * i + self.current_set;
+            let output_buffer_idx = 2 * i + 2 + (1 - self.current_set);
 
             // Get submission metadata
             let metadata = self.buffer_submission_metadata[input_buffer_idx];
@@ -481,12 +472,11 @@ impl<T> VariableSizePipeline<T> {
                             self.bind_groups[i] = Some(bgs);
                         }
 
-                        let (input_buffer_variant, output_state) = if i == 0 {
-                            (1 - self.current_input_write_index, state)
-                        } else {
-                            (1 - state, state)
-                        };
-
+                        // Select the appropriate bind group based on input buffer variant and output state
+                        // In global ping-pong mode, all stages use the same current_set for input
+                        // and write to (1 - current_set) for output
+                        let input_buffer_variant = self.current_set;
+                        let output_state = 1 - self.current_set;
                         let bind_group = &self.bind_groups[i].as_ref().unwrap()
                             [input_buffer_variant][output_state];
 
@@ -520,10 +510,8 @@ impl<T> VariableSizePipeline<T> {
                 self.buffer_submission_metadata[input_buffer_idx];
         }
 
-        // Flip output indices
-        for i in 0..self.current_output_indices.len() {
-            self.current_output_indices[i] = 1 - self.current_output_indices[i];
-        }
+        // Flip the current set for the next tick
+        self.current_set = 1 - self.current_set;
 
         self.context.queue.submit(Some(encoder.finish()));
         self.context.device_poll()?;
@@ -580,10 +568,13 @@ impl<T> VariableSizePipeline<T> {
         }
 
         // Output is in the last stage's current output buffer
+        // With global ping-pong:
+        // - Last stage (num_stages-1) reads from buffer 2*(num_stages-1) + current_set
+        // - Last stage writes to buffer 2*(num_stages-1) + 2 + (1 - current_set) = 2*num_stages + (1 - current_set)
+        // But we flipped current_set after the tick, so the last written buffer is:
+        // 2*num_stages + current_set (because current_set was flipped)
         let last_stage_idx = num_stages - 1;
-        // Buffer layout: stage i output buffers are at [2*(i+1), 2*(i+1)+1]
-        let last_output_buffer_idx =
-            2 * (last_stage_idx + 1) + (1 - self.current_output_indices[last_stage_idx]);
+        let last_output_buffer_idx = 2 * (last_stage_idx + 1) + self.current_set;
         let read_buffer = &self.buffers[last_output_buffer_idx];
 
         let last_stage_vector_dim = self.stage_configs[last_stage_idx].vector_dim;
@@ -788,8 +779,7 @@ impl<T> VariableSizePipelineBuilder<T> {
             compute_pipelines,
             bind_group_layouts,
             bind_groups: vec![None; num_stages],
-            current_output_indices: vec![0; num_stages],
-            current_input_write_index: 0,
+            current_set: 0,
             side_inputs: HashMap::new(),
             last_output_tag: None,
             buffer_submission_metadata: vec![None; num_buffers],
