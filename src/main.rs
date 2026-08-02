@@ -73,28 +73,22 @@ async fn main() -> anyhow::Result<()> {
     pipeline.write_input(&input).await?;
     println!("Input written to pipeline");
 
-    // Advance pipeline by 3 ticks (data needs 3 ticks to propagate through 3 stages)
+    // Advance pipeline by 3 process calls (data needs 3 calls to propagate through 3 stages)
     // We use a simple tag (u64) to track the data flow
     let tag = 1u64;
-    let output_tag = pipeline.tick(Some(tag)).await?;
-    println!("Tick 1: Data in stage 1, output tag: {:?}", output_tag);
+    pipeline.process(Some(tag)).await?; // Call 1: returns None (data in stage 1)
+    println!("Process 1: Data in stage 1");
 
-    let output_tag = pipeline.tick(Some(2u64)).await?;
-    println!("Tick 2: Data in stage 2, output tag: {:?}", output_tag);
+    pipeline.process(Some(2u64)).await?; // Call 2: returns None (data in stage 2)
+    println!("Process 2: Data in stage 2");
 
-    let output_tag = pipeline.tick(Some(3u64)).await?;
-    println!(
-        "Tick 3: Data in stage 3 (output ready), output tag: {:?}",
-        output_tag
-    );
-
-    // Read output from last stage (returns Option<(tag, data)>)
-    let Some((output_tag, output)) = pipeline.read_output().await? else {
+    // Call 3: returns Some with output (data has propagated through all 3 stages)
+    let Some((output_tag, output)) = pipeline.process(Some(3u64)).await? else {
         println!("Output not ready yet");
         return Ok(());
     };
+    println!("Process 3: Data in stage 3 (output ready), output tag: {:?}", output_tag);
     println!("Output: {:?}", output);
-    println!("Output tag: {:?}", output_tag);
 
     // Expected output: identity -> double -> add_one
     // Stage 0 (identity): x stays, y stays

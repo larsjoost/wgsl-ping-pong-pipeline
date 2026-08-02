@@ -32,12 +32,9 @@ async fn test_single_stage_identity() -> anyhow::Result<()> {
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     pipeline.write_input(&input).await?;
 
-    // Tick once (data propagates through 1 stage)
-    let _output_tag = pipeline.tick(Some(1u64)).await?;
-
-    // Read output (returns Option<(tag, data)>)
-    let Some((_tag, output)) = pipeline.read_output().await? else {
-        panic!("Output should be ready after ticking");
+    // Process once (data propagates through 1 stage and output is available)
+    let Some((_tag, output)) = pipeline.process(Some(1u64)).await? else {
+        panic!("Output should be ready after processing");
     };
 
     // Should be identical to input
@@ -57,12 +54,12 @@ async fn test_two_stage_identity() -> anyhow::Result<()> {
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     pipeline.write_input(&input).await?;
 
-    // Tick twice (data needs 2 ticks for 2 stages)
-    let _output_tag1 = pipeline.tick(Some(1u64)).await?;
-    let _output_tag2 = pipeline.tick(Some(1u64)).await?;
-
-    let Some((_tag, output)) = pipeline.read_output().await? else {
-        panic!("Output should be ready after ticking");
+    // First process: returns None (data needs 2 calls for 2 stages)
+    pipeline.process(Some(1u64)).await?;
+    
+    // Second process: returns Some with output
+    let Some((_tag, output)) = pipeline.process(Some(1u64)).await? else {
+        panic!("Output should be ready after second process");
     };
     assert_eq!(output, input);
     Ok(())
@@ -83,18 +80,16 @@ async fn test_three_stage_identity() -> anyhow::Result<()> {
 
     assert_eq!(pipeline.num_stages(), 3);
 
-    let input: Vec<f32> = vec![
-        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
-    ];
+    let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0];
     pipeline.write_input(&input).await?;
 
-    // Tick three times (data needs 3 ticks for 3 stages)
-    let _output_tag1 = pipeline.tick(Some(1u64)).await?;
-    let _output_tag2 = pipeline.tick(Some(1u64)).await?;
-    let _output_tag3 = pipeline.tick(Some(1u64)).await?;
-
-    let Some((_tag, output)) = pipeline.read_output().await? else {
-        panic!("Output should be ready after ticking");
+    // First two processes: return None (data needs 3 calls for 3 stages)
+    pipeline.process(Some(1u64)).await?;
+    pipeline.process(Some(1u64)).await?;
+    
+    // Third process: returns Some with output
+    let Some((_tag, output)) = pipeline.process(Some(1u64)).await? else {
+        panic!("Output should be ready after third process");
     };
     assert_eq!(output, input);
     Ok(())
@@ -109,38 +104,39 @@ async fn test_single_stage_double() -> anyhow::Result<()> {
     // Input: [1,2, 3,4, 5,6, 7,8] (4 vectors of 2D)
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     pipeline.write_input(&input).await?;
-
+    
     // Expected: [2,4, 6,8, 10,12, 14,16]
     let expected: Vec<f32> = vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
 
-    // Tick once to process
-    let _output_tag = pipeline.tick(Some(1u64)).await?;
-
-    let Some((_tag, output)) = pipeline.read_output().await? else {
-        panic!("Output should be ready after ticking");
+    // Process once to process and get output
+    let Some((_tag, output)) = pipeline.process(Some(1u64)).await? else {
+        panic!("Output should be ready after processing");
     };
     assert_eq!(output, expected);
     Ok(())
 }
 
 /// Test: Changing write data during operation.
-/// In the current staggered implementation: write -> tick N times -> read -> write -> tick N times -> read
+/// In the current staggered implementation: write -> process N times -> read -> write -> process N times -> read
 #[pollster::test]
 async fn test_change_write_data_size_during_operation() -> anyhow::Result<()> {
     let stage1 = Stage::identity("id1", 2, 4);
     let stage2 = Stage::identity("id2", 2, 4);
-    let mut pipeline: Pipeline<u64> = Pipeline::new().pipe(stage1).pipe(stage2).build().await?;
+    let mut pipeline: Pipeline<u64> = Pipeline::new()
+        .pipe(stage1)
+        .pipe(stage2)
+        .build()
+        .await?;
 
     // 1. Write first data (8 floats = 4 vectors of 2D)
     let input1: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     pipeline.write_input(&input1).await?;
 
-    // 2. Tick twice for 2-stage pipeline (staggered mode)
-    pipeline.tick(Some(1u64)).await?;
-    pipeline.tick(Some(1u64)).await?;
-
-    // 3. Read first data
-    let Some((_tag, output1)) = pipeline.read_output().await? else {
+    // 2. Process twice for 2-stage pipeline (staggered mode)
+    pipeline.process(Some(1u64)).await?;
+    
+    // 3. Second process: returns Some with output
+    let Some((_tag, output1)) = pipeline.process(Some(1u64)).await? else {
         panic!("First output should be ready");
     };
     assert_eq!(output1, input1);
@@ -149,12 +145,11 @@ async fn test_change_write_data_size_during_operation() -> anyhow::Result<()> {
     let input2: Vec<f32> = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
     pipeline.write_input(&input2).await?;
 
-    // 5. Tick twice
-    pipeline.tick(Some(2u64)).await?;
-    pipeline.tick(Some(2u64)).await?;
-
-    // 6. Read second data
-    let Some((_tag, output2)) = pipeline.read_output().await? else {
+    // 5. Process twice
+    pipeline.process(Some(2u64)).await?;
+    
+    // 6. Second process: returns Some with output
+    let Some((_tag, output2)) = pipeline.process(Some(2u64)).await? else {
         panic!("Second output should be ready");
     };
     assert_eq!(output2, input2);
@@ -182,35 +177,32 @@ impl NonCloneTag {
 #[pollster::test]
 async fn test_tag_follows_data_without_clone() -> anyhow::Result<()> {
     let stage = Stage::identity("identity", 2, 4);
-    let mut pipeline: Pipeline<NonCloneTag> = Pipeline::new().pipe(stage).build().await?;
+    let mut pipeline: Pipeline<NonCloneTag> = Pipeline::new()
+        .pipe(stage)
+        .build()
+        .await?;
 
     // Input data: 4 vectors of 2D (8 f32 values)
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     pipeline.write_input(&input).await?;
 
-    // Tick with a specific tag
+    // Process with a specific tag - output should be available immediately for 1-stage pipeline
     let tag1 = NonCloneTag::new(42, "first");
-    pipeline.tick(Some(tag1)).await?;
-
-    // Read output - should get the same tag back
-    let Some((returned_tag, output)) = pipeline.read_output().await? else {
-        panic!("Output should be ready after ticking");
+    let Some((returned_tag, output)) = pipeline.process(Some(tag1)).await? else {
+        panic!("Output should be ready after processing");
     };
 
     // Verify the tag is returned correctly
     assert_eq!(returned_tag, Some(NonCloneTag::new(42, "first")));
     assert_eq!(output, input);
 
-    // Write new data and tick with a different tag
+    // Write new data and process with a different tag
     let input2: Vec<f32> = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
     pipeline.write_input(&input2).await?;
 
     let tag2 = NonCloneTag::new(99, "second");
-    pipeline.tick(Some(tag2)).await?;
-
-    // Read output - should get the second tag
-    let Some((returned_tag, output)) = pipeline.read_output().await? else {
-        panic!("Output should be ready after ticking");
+    let Some((returned_tag, output)) = pipeline.process(Some(tag2)).await? else {
+        panic!("Output should be ready after processing");
     };
 
     assert_eq!(returned_tag, Some(NonCloneTag::new(99, "second")));
@@ -220,40 +212,33 @@ async fn test_tag_follows_data_without_clone() -> anyhow::Result<()> {
 }
 
 /// Test: Verify tags follow data through multiple stages
-/// In staggered mode, data takes N ticks to propagate through N stages
+/// In staggered mode, data takes N processes to propagate through N stages
 #[pollster::test]
 async fn test_tag_follows_data_through_multiple_stages() -> anyhow::Result<()> {
     let stage1 = Stage::identity("id1", 2, 4);
     let stage2 = Stage::identity("id2", 2, 4);
-    let mut pipeline: Pipeline<NonCloneTag> =
-        Pipeline::new().pipe(stage1).pipe(stage2).build().await?;
+    let mut pipeline: Pipeline<NonCloneTag> = Pipeline::new()
+        .pipe(stage1)
+        .pipe(stage2)
+        .build()
+        .await?;
 
     // Input data
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     pipeline.write_input(&input).await?;
 
-    // Tick with tag - in staggered mode, need N ticks for N stages
+    // First process with tag - data is in stage 0, not yet at output
     let tag1 = NonCloneTag::new(123, "first");
-    pipeline.tick(Some(tag1)).await?;
+    let result1 = pipeline.process(Some(tag1)).await?;
+    assert!(result1.is_none(), "Output should not be ready after first process in 2-stage pipeline");
 
-    // First tick: data is in stage 0, not yet at output
-    // Read should return None
-    let result1 = pipeline.read_output().await?;
-    assert!(
-        result1.is_none(),
-        "Output should not be ready after first tick in 2-stage pipeline"
-    );
-
-    // Second tick: data propagates to stage 1 and output is ready
+    // Second process with tag - data propagates to stage 1 and output is ready
     let tag2 = NonCloneTag::new(456, "second");
-    pipeline.tick(Some(tag2)).await?;
-
-    // Read output - should get the tag from first tick (123)
-    let Some((returned_tag, output)) = pipeline.read_output().await? else {
-        panic!("Output should be ready after second tick");
+    let Some((returned_tag, output)) = pipeline.process(Some(tag2)).await? else {
+        panic!("Output should be ready after second process");
     };
 
-    // Verify tag from first tick follows the data
+    // Verify tag from first process follows the data (delay line behavior)
     assert_eq!(returned_tag, Some(NonCloneTag::new(123, "first")));
     assert_eq!(output, input);
 

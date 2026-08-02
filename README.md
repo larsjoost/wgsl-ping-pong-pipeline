@@ -32,13 +32,14 @@ pipeline.add_side_input("input_b", Arc::clone(&b_buffer));
 let a_data: Vec<f32> = ...;
 pipeline.write_input(&a_data).await?;
 
-// Process through all stages
-for _ in 0..3 {
-    pipeline.tick().await?;
+// Process through all stages and read output
+// For a 3-stage pipeline, the first 2 calls return None, the 3rd returns Some(output)
+for i in 0..2 {
+    pipeline.process(None).await?; // Returns None (data not ready yet)
 }
-
-// Read result
-let output = pipeline.read_output().await?;
+let Some((_tag, output)) = pipeline.process(None).await? else {
+    panic!("Output should be ready after 3 calls for 3-stage pipeline");
+};
 ```
 
 **Important**: For convolution operations, ensure that input B is in the frequency domain before being passed to the multiply stage. You may need to preprocess B with FFT depending on your use case.
@@ -104,12 +105,11 @@ async fn main() -> anyhow::Result<()> {
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
     pipeline.write_input(&input).await?;
 
-    // Advance pipeline (data propagates through stages)
-    pipeline.tick().await?;
-    pipeline.tick().await?;
-
-    // Read output
-    let output = pipeline.read_output().await?;
+    // Process pipeline (data propagates through stages, Nth call returns output)
+    pipeline.process(Some(1u64)).await?; // Returns None for 2-stage
+    let Some((_tag, output)) = pipeline.process(Some(2u64)).await? else {
+        panic!("Output should be ready after 2nd call for 2-stage pipeline");
+    };
     
     Ok(())
 }
@@ -222,8 +222,7 @@ This allows the GPU to process multiple frames simultaneously, maximizing throug
 #### Pipeline
 - `Pipeline::new()` - Create a new pipeline builder
 - `pipeline.write_input(&data)` - Write input data to the pipeline
-- `pipeline.tick()` - Advance the pipeline by one step
-- `pipeline.read_output()` - Read the output data
+- `pipeline.process(tag)` - Advance the pipeline by one step AND read output. Returns `Option<(Option<T>, Vec<f32>)>`. For N-stage pipelines, the first N-1 calls return `None`, the Nth and subsequent calls return `Some((tag, output))` with the delayed tag.
 - `pipeline.add_side_input(name, buffer)` - Add a side input buffer
 - `pipeline.resize(new_batch_size)` - Resize all buffers
 

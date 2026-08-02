@@ -49,14 +49,15 @@ async fn main() -> anyhow::Result<()> {
     pipeline.write_input(&input).await?;
     println!("Input written");
 
-    // Tick the pipeline
+    // Process the pipeline - only the last call returns Some with output
+    let mut result = None;
     for i in 0..pipeline.num_stages() {
-        let _output_tag = pipeline.tick(Some(1u64)).await?;
-        println!("Tick {}", i + 1);
+        result = pipeline.process(Some(1u64)).await?;
+        println!("Process {}", i + 1);
     }
 
-    // Read output (returns Option<(tag, data)>)
-    let Some((output_tag, output)) = pipeline.read_output().await? else {
+    // The last call should return Some with output
+    let Some((output_tag, output)) = result else {
         println!("Output not ready yet");
         return Ok(());
     };

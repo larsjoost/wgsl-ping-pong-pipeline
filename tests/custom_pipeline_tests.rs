@@ -1,13 +1,13 @@
 //! Unit tests for custom pipeline stages.
-//!
+//! 
 //! These tests verify that custom stages implementing the PipelineStage trait
 //! work correctly within the ping-pong pipeline.
 
-use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use wgpu::CommandEncoder;
-use wgsl_ping_pong_pipeline::pipeline::{Pipeline, PipelineStage, Stage};
+use anyhow::Result;
+use wgsl_ping_pong_pipeline::pipeline::{Pipeline, Stage, PipelineStage};
 use wgsl_ping_pong_pipeline::wgpu_utils::ComputeContext;
 
 /// Identity WGSL shader for custom stages
@@ -96,12 +96,7 @@ pub struct WgslCustomStage {
 
 impl WgslCustomStage {
     /// Creates a new custom stage with the given WGSL shader.
-    pub fn new(
-        name: impl Into<String>,
-        wgsl: impl Into<String>,
-        vector_dim: usize,
-        batch_size: usize,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, wgsl: impl Into<String>, vector_dim: usize, batch_size: usize) -> Self {
         Self {
             name: name.into(),
             wgsl: wgsl.into(),
@@ -115,12 +110,7 @@ impl WgslCustomStage {
     }
 
     /// Creates a new custom stage with side input support.
-    pub fn with_side_input(
-        name: impl Into<String>,
-        wgsl: impl Into<String>,
-        vector_dim: usize,
-        batch_size: usize,
-    ) -> Self {
+    pub fn with_side_input(name: impl Into<String>, wgsl: impl Into<String>, vector_dim: usize, batch_size: usize) -> Self {
         Self {
             name: name.into(),
             wgsl: wgsl.into(),
@@ -169,8 +159,7 @@ impl PipelineStage for WgslCustomStage {
         // Build bind group entries based on whether we use side inputs
         let entries: Vec<wgpu::BindGroupEntry> = if self.use_side_input {
             // For multiply stage: binding 0 = input, binding 1 = multiplier, binding 2 = output
-            let multiplier_buffer = side_inputs
-                .get("multiplier")
+            let multiplier_buffer = side_inputs.get("multiplier")
                 .ok_or_else(|| anyhow::anyhow!("Side input 'multiplier' not found"))?;
             vec![
                 wgpu::BindGroupEntry {
@@ -217,8 +206,7 @@ impl PipelineStage for WgslCustomStage {
 
         // Calculate dispatch count
         let workgroup_size = 64u32;
-        let dispatch_count =
-            (self.batch_size as u32 * self.vector_dim as u32 + workgroup_size - 1) / workgroup_size;
+        let dispatch_count = (self.batch_size as u32 * self.vector_dim as u32 + workgroup_size - 1) / workgroup_size;
         pass.dispatch_workgroups(dispatch_count, 1, 1);
 
         Ok(())
@@ -289,11 +277,10 @@ impl PipelineStage for WgslCustomStage {
             ]
         };
 
-        let bgl =
-            Arc::new(context.create_bind_group_layout(
-                Some(&format!("{} Bind Group Layout", self.name)),
-                &entries,
-            ));
+        let bgl = Arc::new(context.create_bind_group_layout(
+            Some(&format!("{} Bind Group Layout", self.name)),
+            &entries,
+        ));
 
         // Create compute pipeline
         let pipeline = Arc::new(context.create_compute_pipeline(
@@ -347,12 +334,9 @@ async fn test_single_custom_identity_stage() -> anyhow::Result<()> {
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     pipeline.write_input(&input).await?;
 
-    // Tick once (data propagates through 1 stage)
-    let _output_tag = pipeline.tick(Some(1u64)).await?;
-
-    // Read output
-    let Some((_tag, output)) = pipeline.read_output().await? else {
-        panic!("Output should be ready after ticking");
+    // Process once (data propagates through 1 stage and output is available)
+    let Some((_tag, output)) = pipeline.process(Some(1u64)).await? else {
+        panic!("Output should be ready after first process in 1-stage pipeline");
     };
 
     // Should be identical to input
@@ -380,11 +364,9 @@ async fn test_single_custom_double_stage() -> anyhow::Result<()> {
     // Expected: [2,4, 6,8, 10,12, 14,16]
     let expected: Vec<f32> = vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
 
-    // Tick once to process
-    let _output_tag = pipeline.tick(Some(1u64)).await?;
-
-    let Some((_tag, output)) = pipeline.read_output().await? else {
-        panic!("Output should be ready after ticking");
+    // Process once to process (1-stage pipeline)
+    let Some((_tag, output)) = pipeline.process(Some(1u64)).await? else {
+        panic!("Output should be ready after first process in 1-stage pipeline");
     };
     assert_eq!(output, expected);
     Ok(())
@@ -406,12 +388,11 @@ async fn test_two_custom_identity_stages() -> anyhow::Result<()> {
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     pipeline.write_input(&input).await?;
 
-    // Tick twice (data needs 2 ticks for 2 stages)
-    let _output_tag1 = pipeline.tick(Some(1u64)).await?;
-    let _output_tag2 = pipeline.tick(Some(1u64)).await?;
-
-    let Some((_tag, output)) = pipeline.read_output().await? else {
-        panic!("Output should be ready after ticking");
+    // Process twice (2 stages)
+    let result1 = pipeline.process(Some(1u64)).await?;
+    assert!(result1.is_none(), "First process should return None for 2-stage pipeline");
+    let Some((_tag, output)) = pipeline.process(Some(1u64)).await? else {
+        panic!("Second process should return Some for 2-stage pipeline");
     };
     assert_eq!(output, input);
     Ok(())
@@ -423,7 +404,7 @@ async fn test_mixed_standard_then_custom() -> anyhow::Result<()> {
     // Standard identity stage + custom double stage
     let standard_stage = Stage::identity("standard_id", 2, 4);
     let custom_stage = WgslCustomStage::new("custom_double", DOUBLE_WGSL, 2, 4);
-
+    
     let mut pipeline: Pipeline<u64> = Pipeline::new()
         .pipe(standard_stage)
         .pipe_custom(Box::new(custom_stage))
@@ -434,15 +415,14 @@ async fn test_mixed_standard_then_custom() -> anyhow::Result<()> {
 
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     let expected: Vec<f32> = vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
-
+    
     pipeline.write_input(&input).await?;
 
-    // Tick twice (2 stages)
-    let _output_tag1 = pipeline.tick(Some(1u64)).await?;
-    let _output_tag2 = pipeline.tick(Some(1u64)).await?;
-
-    let Some((_tag, output)) = pipeline.read_output().await? else {
-        panic!("Output should be ready after ticking");
+    // Process twice (2 stages)
+    let result1 = pipeline.process(Some(1u64)).await?;
+    assert!(result1.is_none(), "First process should return None for 2-stage pipeline");
+    let Some((_tag, output)) = pipeline.process(Some(1u64)).await? else {
+        panic!("Second process should return Some for 2-stage pipeline");
     };
     assert_eq!(output, expected);
     Ok(())
@@ -454,7 +434,7 @@ async fn test_mixed_custom_then_standard() -> anyhow::Result<()> {
     // Custom double stage + standard identity stage
     let custom_stage = WgslCustomStage::new("custom_double", DOUBLE_WGSL, 2, 4);
     let standard_stage = Stage::identity("standard_id", 2, 4);
-
+    
     let mut pipeline: Pipeline<u64> = Pipeline::new()
         .pipe_custom(Box::new(custom_stage))
         .pipe(standard_stage)
@@ -465,15 +445,14 @@ async fn test_mixed_custom_then_standard() -> anyhow::Result<()> {
 
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     let expected: Vec<f32> = vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
-
+    
     pipeline.write_input(&input).await?;
 
-    // Tick twice (2 stages)
-    let _output_tag1 = pipeline.tick(Some(1u64)).await?;
-    let _output_tag2 = pipeline.tick(Some(1u64)).await?;
-
-    let Some((_tag, output)) = pipeline.read_output().await? else {
-        panic!("Output should be ready after ticking");
+    // Process twice (2 stages)
+    let result1 = pipeline.process(Some(1u64)).await?;
+    assert!(result1.is_none(), "First process should return None for 2-stage pipeline");
+    let Some((_tag, output)) = pipeline.process(Some(1u64)).await? else {
+        panic!("Second process should return Some for 2-stage pipeline");
     };
     assert_eq!(output, expected);
     Ok(())
@@ -485,7 +464,7 @@ async fn test_three_custom_stages_chain() -> anyhow::Result<()> {
     let double_stage = WgslCustomStage::new("double", DOUBLE_WGSL, 2, 4);
     let triple_stage = WgslCustomStage::new("triple", TRIPLE_WGSL, 2, 4);
     let identity_stage = WgslCustomStage::new("identity", IDENTITY_WGSL, 2, 4);
-
+    
     let mut pipeline: Pipeline<u64> = Pipeline::new()
         .pipe_custom(Box::new(double_stage))
         .pipe_custom(Box::new(triple_stage))
@@ -500,16 +479,16 @@ async fn test_three_custom_stages_chain() -> anyhow::Result<()> {
     // triple: [6,12,18,24,30,36,42,48]
     // identity: [6,12,18,24,30,36,42,48]
     let expected: Vec<f32> = vec![6.0, 12.0, 18.0, 24.0, 30.0, 36.0, 42.0, 48.0];
-
+    
     pipeline.write_input(&input).await?;
 
-    // Tick three times (3 stages)
-    let _output_tag1 = pipeline.tick(Some(1u64)).await?;
-    let _output_tag2 = pipeline.tick(Some(1u64)).await?;
-    let _output_tag3 = pipeline.tick(Some(1u64)).await?;
-
-    let Some((_tag, output)) = pipeline.read_output().await? else {
-        panic!("Output should be ready after ticking");
+    // Process three times (3 stages)
+    let result1 = pipeline.process(Some(1u64)).await?;
+    assert!(result1.is_none(), "First process should return None for 3-stage pipeline");
+    let result2 = pipeline.process(Some(1u64)).await?;
+    assert!(result2.is_none(), "Second process should return None for 3-stage pipeline");
+    let Some((_tag, output)) = pipeline.process(Some(1u64)).await? else {
+        panic!("Third process should return Some for 3-stage pipeline");
     };
     assert_eq!(output, expected);
     Ok(())
@@ -519,10 +498,10 @@ async fn test_three_custom_stages_chain() -> anyhow::Result<()> {
 #[pollster::test]
 async fn test_custom_stage_with_side_input() -> anyhow::Result<()> {
     use wgsl_ping_pong_pipeline::wgpu_utils::stage_buffer_usages;
-
+    
     // Create a shared compute context
     let context = Arc::new(ComputeContext::new_high_performance().await?);
-
+    
     // Create multiplier buffer with value 3.0
     let multiplier_value = 3.0f32;
     let multiplier_buffer = Arc::new(context.create_buffer_with_data(
@@ -530,18 +509,22 @@ async fn test_custom_stage_with_side_input() -> anyhow::Result<()> {
         &[multiplier_value],
         stage_buffer_usages(),
     ));
-
+    
     // Create custom stage that uses side input
-    let custom_stage =
-        WgslCustomStage::with_side_input("multiply_with_side", MULTIPLY_WITH_SIDE_WGSL, 2, 4);
-
+    let custom_stage = WgslCustomStage::with_side_input(
+        "multiply_with_side", 
+        MULTIPLY_WITH_SIDE_WGSL, 
+        2, 
+        4
+    );
+    
     // Build pipeline with custom context
     let mut pipeline: Pipeline<u64> = Pipeline::new()
         .with_context(Arc::clone(&context))
         .pipe_custom(Box::new(custom_stage))
         .build()
         .await?;
-
+    
     // Add the side input buffer to the pipeline
     pipeline.add_side_input("multiplier", Arc::clone(&multiplier_buffer));
 
@@ -550,27 +533,23 @@ async fn test_custom_stage_with_side_input() -> anyhow::Result<()> {
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     // Each element multiplied by 3.0
     let expected: Vec<f32> = vec![3.0, 6.0, 9.0, 12.0, 15.0, 18.0, 21.0, 24.0];
-
+    
     pipeline.write_input(&input).await?;
 
-    // Tick once
-    let _output_tag = pipeline.tick(Some(1u64)).await?;
-
-    let Some((_tag, output)) = pipeline.read_output().await? else {
-        panic!("Output should be ready after ticking");
+    // Process once (1-stage pipeline)
+    let Some((_tag, output)) = pipeline.process(Some(1u64)).await? else {
+        panic!("Output should be ready after first process in 1-stage pipeline");
     };
-
+    
     // Verify with tolerance for floating point
     for (i, (actual, expected_val)) in output.iter().zip(expected.iter()).enumerate() {
         assert!(
             (actual - expected_val).abs() < 1e-5,
             "Mismatch at index {}: expected {}, got {}",
-            i,
-            expected_val,
-            actual
+            i, expected_val, actual
         );
     }
-
+    
     Ok(())
 }
 
@@ -581,7 +560,7 @@ async fn test_complex_mixed_pipeline() -> anyhow::Result<()> {
     let custom_stage1 = WgslCustomStage::new("custom_double", DOUBLE_WGSL, 2, 4);
     let standard_stage2 = Stage::identity("std_id2", 2, 4);
     let custom_stage2 = WgslCustomStage::new("custom_triple", TRIPLE_WGSL, 2, 4);
-
+    
     let mut pipeline: Pipeline<u64> = Pipeline::new()
         .pipe(standard_stage1)
         .pipe_custom(Box::new(custom_stage1))
@@ -598,18 +577,21 @@ async fn test_complex_mixed_pipeline() -> anyhow::Result<()> {
     // std_id2: [2,4,6,8,10,12,14,16]
     // custom_triple: [6,12,18,24,30,36,42,48]
     let expected: Vec<f32> = vec![6.0, 12.0, 18.0, 24.0, 30.0, 36.0, 42.0, 48.0];
-
+    
     pipeline.write_input(&input).await?;
 
-    // Tick 4 times (4 stages)
-    for _ in 0..4 {
-        pipeline.tick(Some(1u64)).await?;
+    // Process 4 times (4 stages)
+    for i in 0..4 {
+        let result = pipeline.process(Some(1u64)).await?;
+        if i < 3 {
+            assert!(result.is_none(), "Process {} should return None for 4-stage pipeline", i + 1);
+        } else {
+            let Some((_tag, output)) = result else {
+                panic!("Fourth process should return Some for 4-stage pipeline");
+            };
+            assert_eq!(output, expected);
+        }
     }
-
-    let Some((_tag, output)) = pipeline.read_output().await? else {
-        panic!("Output should be ready after ticking");
-    };
-    assert_eq!(output, expected);
     Ok(())
 }
 
@@ -618,7 +600,7 @@ async fn test_complex_mixed_pipeline() -> anyhow::Result<()> {
 async fn test_custom_stage_large_batch() -> anyhow::Result<()> {
     let batch_size = 256;
     let vector_dim = 2;
-
+    
     let custom_stage = WgslCustomStage::new("large_double", DOUBLE_WGSL, vector_dim, batch_size);
     let mut pipeline: Pipeline<u64> = Pipeline::new()
         .pipe_custom(Box::new(custom_stage))
@@ -632,12 +614,12 @@ async fn test_custom_stage_large_batch() -> anyhow::Result<()> {
     // Create input with all elements set to 1.0
     let input: Vec<f32> = vec![1.0; batch_size * vector_dim];
     let expected: Vec<f32> = vec![2.0; batch_size * vector_dim];
-
+    
     pipeline.write_input(&input).await?;
-    pipeline.tick(Some(1u64)).await?;
 
-    let Some((_tag, output)) = pipeline.read_output().await? else {
-        panic!("Output should be ready after ticking");
+    // Process once (1-stage pipeline)
+    let Some((_tag, output)) = pipeline.process(Some(1u64)).await? else {
+        panic!("Output should be ready after first process in 1-stage pipeline");
     };
     assert_eq!(output, expected);
     Ok(())
@@ -649,7 +631,7 @@ async fn test_multiple_custom_stage_instances() -> anyhow::Result<()> {
     // Create two separate instances of the same WGSL shader
     let custom_double1 = WgslCustomStage::new("double1", DOUBLE_WGSL, 2, 4);
     let custom_double2 = WgslCustomStage::new("double2", DOUBLE_WGSL, 2, 4);
-
+    
     let mut pipeline: Pipeline<u64> = Pipeline::new()
         .pipe_custom(Box::new(custom_double1))
         .pipe_custom(Box::new(custom_double2))
@@ -662,15 +644,14 @@ async fn test_multiple_custom_stage_instances() -> anyhow::Result<()> {
     // double1: [2,4,6,8,10,12,14,16]
     // double2: [4,8,12,16,20,24,28,32]
     let expected: Vec<f32> = vec![4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0];
-
+    
     pipeline.write_input(&input).await?;
 
-    // Tick twice
-    pipeline.tick(Some(1u64)).await?;
-    pipeline.tick(Some(1u64)).await?;
-
-    let Some((_tag, output)) = pipeline.read_output().await? else {
-        panic!("Output should be ready after ticking");
+    // Process twice (2 stages)
+    let result1 = pipeline.process(Some(1u64)).await?;
+    assert!(result1.is_none(), "First process should return None for 2-stage pipeline");
+    let Some((_tag, output)) = pipeline.process(Some(1u64)).await? else {
+        panic!("Second process should return Some for 2-stage pipeline");
     };
     assert_eq!(output, expected);
     Ok(())
@@ -692,12 +673,12 @@ async fn test_custom_stage_scalar() -> anyhow::Result<()> {
     // Input: 8 scalar values
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     let expected: Vec<f32> = vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
-
+    
     pipeline.write_input(&input).await?;
-    pipeline.tick(Some(1u64)).await?;
 
-    let Some((_tag, output)) = pipeline.read_output().await? else {
-        panic!("Output should be ready after ticking");
+    // Process once (1-stage pipeline)
+    let Some((_tag, output)) = pipeline.process(Some(1u64)).await? else {
+        panic!("Output should be ready after first process in 1-stage pipeline");
     };
     assert_eq!(output, expected);
     Ok(())
@@ -708,7 +689,7 @@ async fn test_custom_stage_scalar() -> anyhow::Result<()> {
 async fn test_custom_stage_4d_vectors() -> anyhow::Result<()> {
     let vector_dim = 4;
     let batch_size = 2; // 2 vectors of 4D = 8 f32 values
-
+    
     let custom_stage = WgslCustomStage::new("4d_double", DOUBLE_WGSL, vector_dim, batch_size);
     let mut pipeline: Pipeline<u64> = Pipeline::new()
         .pipe_custom(Box::new(custom_stage))
@@ -722,12 +703,12 @@ async fn test_custom_stage_4d_vectors() -> anyhow::Result<()> {
     // Input: 2 vectors of 4D = [v1x, v1y, v1z, v1w, v2x, v2y, v2z, v2w]
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     let expected: Vec<f32> = vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
-
+    
     pipeline.write_input(&input).await?;
-    pipeline.tick(Some(1u64)).await?;
 
-    let Some((_tag, output)) = pipeline.read_output().await? else {
-        panic!("Output should be ready after ticking");
+    // Process once (1-stage pipeline)
+    let Some((_tag, output)) = pipeline.process(Some(1u64)).await? else {
+        panic!("Output should be ready after first process in 1-stage pipeline");
     };
     assert_eq!(output, expected);
     Ok(())
@@ -742,11 +723,11 @@ async fn test_custom_stage_4d_vectors() -> anyhow::Result<()> {
 async fn test_two_custom_stages_with_varying_metadata() -> anyhow::Result<()> {
     let batch_size = 8;
     let vector_dim = 1;
-
+    
     // Two custom double stages
     let stage1 = WgslCustomStage::new("stage1", DOUBLE_WGSL, vector_dim, batch_size);
     let stage2 = WgslCustomStage::new("stage2", DOUBLE_WGSL, vector_dim, batch_size);
-
+    
     let mut pipeline: Pipeline<u64> = Pipeline::new()
         .pipe_custom(Box::new(stage1))
         .pipe_custom(Box::new(stage2))
@@ -755,48 +736,48 @@ async fn test_two_custom_stages_with_varying_metadata() -> anyhow::Result<()> {
 
     assert_eq!(pipeline.num_stages(), 2);
 
-    // Tick 1: Full buffer with metadata indicating 8 elements
+    // Process 1: Full buffer with metadata indicating 8 elements
     let input1: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     pipeline.set_input_submission_metadata(8, 8, batch_size);
     pipeline.write_input(&input1).await?;
-    pipeline.tick(Some(1u64)).await?;
-    pipeline.tick(Some(1u64)).await?;
-
-    let Some((_tag, output1)) = pipeline.read_output().await? else {
+    
+    // Process twice (2 stages)
+    pipeline.process(Some(1u64)).await?;
+    let Some((_tag, output1)) = pipeline.process(Some(1u64)).await? else {
         panic!("Output should be ready");
     };
     // [1,2,3,4,5,6,7,8] -> stage1: [2,4,6,8,10,12,14,16] -> stage2: [4,8,12,16,20,24,28,32]
     assert_eq!(output1, vec![4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0]);
 
-    // Tick 2: Different data, metadata still 8 elements
+    // Process 2: Different data, metadata still 8 elements
     let input2: Vec<f32> = vec![10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0];
     pipeline.set_input_submission_metadata(8, 8, batch_size);
     pipeline.write_input(&input2).await?;
-    pipeline.tick(Some(2u64)).await?;
-    pipeline.tick(Some(2u64)).await?;
-
-    let Some((_tag, output2)) = pipeline.read_output().await? else {
+    
+    // Process twice (2 stages)
+    pipeline.process(Some(2u64)).await?;
+    let Some((_tag, output2)) = pipeline.process(Some(2u64)).await? else {
         panic!("Output should be ready");
     };
     // All 10s -> stage1: all 20s -> stage2: all 40s
     assert_eq!(output2, vec![40.0; 8]);
 
-    // Tick 3: Metadata indicates only 4 actual elements (but buffer still has 8)
+    // Process 3: Metadata indicates only 4 actual elements (but buffer still has 8)
     // The pipeline still processes all 8 buffer elements, but the metadata tracks that
     // only the first 4 are "actual" data
     let input3: Vec<f32> = vec![100.0, 200.0, 300.0, 400.0, 0.0, 0.0, 0.0, 0.0];
     pipeline.set_input_submission_metadata(4, 4, batch_size);
     pipeline.write_input(&input3).await?;
-    pipeline.tick(Some(3u64)).await?;
-    pipeline.tick(Some(3u64)).await?;
-
-    let Some((_tag, output3)) = pipeline.read_output().await? else {
+    
+    // Process twice (2 stages)
+    pipeline.process(Some(3u64)).await?;
+    let Some((_tag, output3)) = pipeline.process(Some(3u64)).await? else {
         panic!("Output should be ready");
     };
     // [100,200,300,400,0,0,0,0] -> stage1: [200,400,600,800,0,0,0,0] -> stage2: [400,800,1200,1600,0,0,0,0]
     assert_eq!(output3[0..4], vec![400.0, 800.0, 1200.0, 1600.0]);
     assert_eq!(output3[4..8], vec![0.0; 4]);
-
+    
     Ok(())
 }
 
@@ -807,11 +788,11 @@ async fn test_two_custom_stages_with_varying_metadata() -> anyhow::Result<()> {
 async fn test_two_custom_stages_dynamic_buffer_growth() -> anyhow::Result<()> {
     let initial_batch_size = 4;
     let vector_dim = 1;
-
+    
     // Create two custom double stages
     let stage1 = WgslCustomStage::new("stage1", DOUBLE_WGSL, vector_dim, initial_batch_size);
     let stage2 = WgslCustomStage::new("stage2", DOUBLE_WGSL, vector_dim, initial_batch_size);
-
+    
     let mut pipeline: Pipeline<u64> = Pipeline::new()
         .pipe_custom(Box::new(stage1))
         .pipe_custom(Box::new(stage2))
@@ -825,10 +806,10 @@ async fn test_two_custom_stages_dynamic_buffer_growth() -> anyhow::Result<()> {
     let input1: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
     pipeline.set_input_submission_metadata(4, 4, initial_batch_size);
     pipeline.write_input(&input1).await?;
-    pipeline.tick(Some(1u64)).await?;
-    pipeline.tick(Some(1u64)).await?;
-
-    let Some((_tag, output1)) = pipeline.read_output().await? else {
+    
+    // Process twice (2 stages)
+    pipeline.process(Some(1u64)).await?;
+    let Some((_tag, output1)) = pipeline.process(Some(1u64)).await? else {
         panic!("Output should be ready");
     };
     // [1,2,3,4] -> stage1: [2,4,6,8] -> stage2: [4,8,12,16]
@@ -838,41 +819,38 @@ async fn test_two_custom_stages_dynamic_buffer_growth() -> anyhow::Result<()> {
     let new_batch_size = 8;
     pipeline.resize(new_batch_size).await?;
     assert_eq!(pipeline.batch_size(), new_batch_size);
-
+    
     // Second: Process with new larger size (8 elements)
     let input2: Vec<f32> = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
     pipeline.set_input_submission_metadata(8, 8, new_batch_size);
     pipeline.write_input(&input2).await?;
-    pipeline.tick(Some(2u64)).await?;
-    pipeline.tick(Some(2u64)).await?;
-
-    let Some((_tag, output2)) = pipeline.read_output().await? else {
+    
+    // Process twice (2 stages)
+    pipeline.process(Some(2u64)).await?;
+    let Some((_tag, output2)) = pipeline.process(Some(2u64)).await? else {
         panic!("Output should be ready after resize");
     };
     // [10,20,30,40,50,60,70,80] -> stage1: [20,40,60,80,100,120,140,160] -> stage2: [40,80,120,160,200,240,280,320]
-    assert_eq!(
-        output2,
-        vec![40.0, 80.0, 120.0, 160.0, 200.0, 240.0, 280.0, 320.0]
-    );
+    assert_eq!(output2, vec![40.0, 80.0, 120.0, 160.0, 200.0, 240.0, 280.0, 320.0]);
 
     // Resize again to handle even larger data (16 elements)
     let larger_batch_size = 16;
     pipeline.resize(larger_batch_size).await?;
     assert_eq!(pipeline.batch_size(), larger_batch_size);
-
+    
     // Third: Process with even larger size (16 elements)
     let input3: Vec<f32> = vec![1.0; 16];
     pipeline.set_input_submission_metadata(16, 16, larger_batch_size);
     pipeline.write_input(&input3).await?;
-    pipeline.tick(Some(3u64)).await?;
-    pipeline.tick(Some(3u64)).await?;
-
-    let Some((_tag, output3)) = pipeline.read_output().await? else {
+    
+    // Process twice (2 stages)
+    pipeline.process(Some(3u64)).await?;
+    let Some((_tag, output3)) = pipeline.process(Some(3u64)).await? else {
         panic!("Output should be ready after second resize");
     };
     // All 1s -> stage1: all 2s -> stage2: all 4s
     assert_eq!(output3, vec![4.0; 16]);
-
+    
     Ok(())
 }
 
@@ -880,16 +858,14 @@ async fn test_two_custom_stages_dynamic_buffer_growth() -> anyhow::Result<()> {
 /// This demonstrates that the VariableSizePipeline can resize individual stage buffers.
 #[pollster::test]
 async fn test_two_custom_stages_selective_resize() -> anyhow::Result<()> {
-    use wgsl_ping_pong_pipeline::pipeline::variable_size::{
-        VariableSizePipeline, VariableSizePipelineBuilder,
-    };
-
+    use wgsl_ping_pong_pipeline::pipeline::variable_size::{VariableSizePipeline, VariableSizePipelineBuilder};
+    
     let vector_dim = 1;
-
+    
     // Create two custom double stages with initial size 4
     let stage1 = WgslCustomStage::new("stage1", DOUBLE_WGSL, vector_dim, 4);
     let stage2 = WgslCustomStage::new("stage2", DOUBLE_WGSL, vector_dim, 4);
-
+    
     let mut pipeline: VariableSizePipeline<u64> = VariableSizePipelineBuilder::new()
         .pipe_custom_with_size(Box::new(stage1), 4)
         .pipe_custom_with_size(Box::new(stage2), 4)
@@ -903,7 +879,7 @@ async fn test_two_custom_stages_selective_resize() -> anyhow::Result<()> {
     pipeline.write_input(&input1).await?;
     pipeline.tick(1u64).await?;
     pipeline.tick(1u64).await?;
-
+    
     let Some((_tag, output1)) = pipeline.read_output().await? else {
         panic!("Output should be ready");
     };
@@ -911,34 +887,31 @@ async fn test_two_custom_stages_selective_resize() -> anyhow::Result<()> {
 
     // Use resize_stage_both to resize both buffers in a pair at once
     // This is simpler and ensures both buffers match
-    pipeline.resize_stage_both(2, 8).await?; // Stage 2 = stage 1's output buffers
-    pipeline.resize_stage_both(1, 8).await?; // Stage 1 = stage 0's output buffers  
-    pipeline.resize_stage_both(0, 8).await?; // Stage 0 = input buffers
-
+    pipeline.resize_stage_both(2, 8).await?;  // Stage 2 = stage 1's output buffers
+    pipeline.resize_stage_both(1, 8).await?;  // Stage 1 = stage 0's output buffers  
+    pipeline.resize_stage_both(0, 8).await?;  // Stage 0 = input buffers
+    
     // Verify all buffers are now size 8
     let (input_a, input_b) = pipeline.get_stage_buffer_sizes(0);
     let (stage1_a, stage1_b) = pipeline.get_stage_buffer_sizes(1);
     let (stage2_a, stage2_b) = pipeline.get_stage_buffer_sizes(2);
-    assert_eq!(input_a, 8);
-    assert_eq!(input_b, 8);
-    assert_eq!(stage1_a, 8);
-    assert_eq!(stage1_b, 8);
-    assert_eq!(stage2_a, 8);
-    assert_eq!(stage2_b, 8);
-
+    assert_eq!(input_a, 8); assert_eq!(input_b, 8);
+    assert_eq!(stage1_a, 8); assert_eq!(stage1_b, 8);
+    assert_eq!(stage2_a, 8); assert_eq!(stage2_b, 8);
+    
     // Now process with full 8 elements
     let input2: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     pipeline.write_input(&input2).await?;
     pipeline.tick(2u64).await?;
     pipeline.tick(2u64).await?;
-
+    
     let Some((_tag, output2)) = pipeline.read_output().await? else {
         panic!("Output should be ready");
     };
-
+    
     // All 8 elements processed correctly
     assert_eq!(output2, vec![4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0]);
-
+    
     Ok(())
 }
 
@@ -946,16 +919,14 @@ async fn test_two_custom_stages_selective_resize() -> anyhow::Result<()> {
 /// This test demonstrates proper ping-pong behavior where only the non-writing buffer is resized.
 #[pollster::test]
 async fn test_selective_resize_one_buffer_only() -> anyhow::Result<()> {
-    use wgsl_ping_pong_pipeline::pipeline::variable_size::{
-        VariableSizePipeline, VariableSizePipelineBuilder,
-    };
-
+    use wgsl_ping_pong_pipeline::pipeline::variable_size::{VariableSizePipeline, VariableSizePipelineBuilder};
+    
     let vector_dim = 1;
-
+    
     // Create two custom double stages with initial size 4
     let stage1 = WgslCustomStage::new("stage1", DOUBLE_WGSL, vector_dim, 4);
     let stage2 = WgslCustomStage::new("stage2", DOUBLE_WGSL, vector_dim, 4);
-
+    
     let mut pipeline: VariableSizePipeline<u64> = VariableSizePipelineBuilder::new()
         .pipe_custom_with_size(Box::new(stage1), 4)
         .pipe_custom_with_size(Box::new(stage2), 4)
@@ -968,12 +939,9 @@ async fn test_selective_resize_one_buffer_only() -> anyhow::Result<()> {
     let (input_a, input_b) = pipeline.get_stage_buffer_sizes(0);
     let (stage0_out_a, stage0_out_b) = pipeline.get_stage_buffer_sizes(1);
     let (stage1_out_a, stage1_out_b) = pipeline.get_stage_buffer_sizes(2);
-    assert_eq!(input_a, 4);
-    assert_eq!(input_b, 4);
-    assert_eq!(stage0_out_a, 4);
-    assert_eq!(stage0_out_b, 4);
-    assert_eq!(stage1_out_a, 4);
-    assert_eq!(stage1_out_b, 4);
+    assert_eq!(input_a, 4); assert_eq!(input_b, 4);
+    assert_eq!(stage0_out_a, 4); assert_eq!(stage0_out_b, 4);
+    assert_eq!(stage1_out_a, 4); assert_eq!(stage1_out_b, 4);
 
     // Do one tick to put pipeline in a known state
     // After one tick, current_input_write_index will be 1 (flipped from 0)
@@ -989,21 +957,14 @@ async fn test_selective_resize_one_buffer_only() -> anyhow::Result<()> {
     // Verify that only ONE buffer was resized
     let (stage1_out_a, stage1_out_b) = pipeline.get_stage_buffer_sizes(2);
     // One should be 8 (the resized one), the other should still be 4 (the old one)
-    let sizes_match =
-        (stage1_out_a == 8 && stage1_out_b == 4) || (stage1_out_a == 4 && stage1_out_b == 8);
-    assert!(
-        sizes_match,
-        "Expected one buffer to be size 8 and the other size 4, got ({}, {})",
-        stage1_out_a, stage1_out_b
-    );
+    let sizes_match = (stage1_out_a == 8 && stage1_out_b == 4) || (stage1_out_a == 4 && stage1_out_b == 8);
+    assert!(sizes_match, "Expected one buffer to be size 8 and the other size 4, got ({}, {})", stage1_out_a, stage1_out_b);
 
     // Verify other buffers were NOT affected
     let (input_a, input_b) = pipeline.get_stage_buffer_sizes(0);
     let (stage0_out_a, stage0_out_b) = pipeline.get_stage_buffer_sizes(1);
-    assert_eq!(input_a, 4);
-    assert_eq!(input_b, 4);
-    assert_eq!(stage0_out_a, 4);
-    assert_eq!(stage0_out_b, 4);
+    assert_eq!(input_a, 4); assert_eq!(input_b, 4);
+    assert_eq!(stage0_out_a, 4); assert_eq!(stage0_out_b, 4);
 
     // Do another tick - the pipeline should still work
     // The metadata for stage 1's buffers will now have the resized buffer available
@@ -1024,7 +985,7 @@ async fn test_selective_resize_one_buffer_only() -> anyhow::Result<()> {
 async fn test_custom_stage_change_write_data_size_during_operation() -> anyhow::Result<()> {
     let stage1 = WgslCustomStage::new("custom_stage1", DOUBLE_WGSL, 2, 4);
     let stage2 = WgslCustomStage::new("custom_stage2", DOUBLE_WGSL, 2, 4);
-
+    
     let mut pipeline: Pipeline<u64> = Pipeline::new()
         .pipe_custom(Box::new(stage1))
         .pipe_custom(Box::new(stage2))
@@ -1037,26 +998,26 @@ async fn test_custom_stage_change_write_data_size_during_operation() -> anyhow::
     let input1: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     pipeline.write_input(&input1).await?;
 
-    // 2. Tick twice for 2-stage pipeline (staggered mode)
-    pipeline.tick(Some(1u64)).await?;
-    pipeline.tick(Some(1u64)).await?;
-
+    // 2. Process twice for 2-stage pipeline (staggered mode)
+    pipeline.process(Some(1u64)).await?;
+    
     // 3. Read first data: [1,2,3,4,5,6,7,8] -> stage1: double -> stage2: double -> [4,8,12,16,20,24,28,32]
-    let Some((_tag, output1)) = pipeline.read_output().await? else {
+    let Some((_tag, output1)) = pipeline.process(Some(1u64)).await? else {
         panic!("First output should be ready");
     };
     assert_eq!(output1, vec![4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0]);
 
     // 4. Write second data (8 floats)
-    let input2: Vec<f32> = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
+    let input2: Vec<f32> = vec![
+        10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0,
+    ];
     pipeline.write_input(&input2).await?;
 
-    // 5. Tick twice
-    pipeline.tick(Some(2u64)).await?;
-    pipeline.tick(Some(2u64)).await?;
-
+    // 5. Process twice
+    pipeline.process(Some(2u64)).await?;
+    
     // 6. Read second data: [10,20,...,80] -> double twice -> [40,80,...,320]
-    let Some((_tag, output2)) = pipeline.read_output().await? else {
+    let Some((_tag, output2)) = pipeline.process(Some(2u64)).await? else {
         panic!("Second output should be ready");
     };
     let expected2: Vec<f32> = input2.iter().map(|x| x * 4.0).collect();
@@ -1064,3 +1025,5 @@ async fn test_custom_stage_change_write_data_size_during_operation() -> anyhow::
 
     Ok(())
 }
+
+

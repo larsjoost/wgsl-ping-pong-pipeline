@@ -1,11 +1,11 @@
 //! Unit tests for the tag system in wgsl-ping-pong-pipeline
 
-use anyhow::Result;
+use wgsl_ping_pong_pipeline::pipeline::{Stage, StageConfig, PipelineStage};
+use wgsl_ping_pong_pipeline::wgpu_utils::ComputeContext;
 use std::collections::HashMap;
 use std::sync::Arc;
 use wgpu::CommandEncoder;
-use wgsl_ping_pong_pipeline::pipeline::{PipelineStage, Stage, StageConfig};
-use wgsl_ping_pong_pipeline::wgpu_utils::ComputeContext;
+use anyhow::Result;
 
 /// A test tag struct with an id field
 #[derive(Debug, Clone, PartialEq)]
@@ -75,19 +75,14 @@ mod tests {
     /// Test that StageConfig can store and forward tags correctly
     #[test]
     fn test_stage_config_tag_storage() {
-        let stage = Stage::new(
-            "test_stage",
-            "@compute @workgroup_size(1) fn main() {}",
-            2,
-            1024,
-        );
-
+        let stage = Stage::new("test_stage", "@compute @workgroup_size(1) fn main() {}", 2, 1024);
+        
         // Create StageConfig with a tag
         let config = StageConfig::<TestTag>::Standard {
             stage,
             tag: Some(TestTag::new(1)),
         };
-
+        
         // Verify tag is stored
         assert_eq!(config.tag(), &Some(TestTag::new(1)));
     }
@@ -95,17 +90,12 @@ mod tests {
     /// Test that forward_tag exchanges tags correctly
     #[test]
     fn test_stage_config_forward_tag_standard() {
-        let stage = Stage::new(
-            "test_stage",
-            "@compute @workgroup_size(1) fn main() {}",
-            2,
-            1024,
-        );
+        let stage = Stage::new("test_stage", "@compute @workgroup_size(1) fn main() {}", 2, 1024);
         let mut config = StageConfig::<TestTag>::Standard {
             stage,
             tag: Some(TestTag::new(42)),
         };
-
+        
         // Forward a new tag, should get the old one back
         let old_tag = config.forward_tag(Some(TestTag::new(100)));
         assert_eq!(old_tag, Some(TestTag::new(42)));
@@ -115,14 +105,12 @@ mod tests {
     /// Test forward_tag with None
     #[test]
     fn test_stage_config_forward_tag_with_none() {
-        let stage = Stage::new(
-            "test_stage",
-            "@compute @workgroup_size(1) fn main() {}",
-            2,
-            1024,
-        );
-        let mut config = StageConfig::<TestTag>::Standard { stage, tag: None };
-
+        let stage = Stage::new("test_stage", "@compute @workgroup_size(1) fn main() {}", 2, 1024);
+        let mut config = StageConfig::<TestTag>::Standard {
+            stage,
+            tag: None,
+        };
+        
         // Forward a tag to a config with None, should get None back
         let old_tag = config.forward_tag(Some(TestTag::new(1)));
         assert_eq!(old_tag, None);
@@ -141,7 +129,7 @@ mod tests {
             stage: custom_stage,
             tag: Some(TestTag::new(99)),
         };
-
+        
         // Forward a new tag
         let old_tag = config.forward_tag(Some(TestTag::new(200)));
         assert_eq!(old_tag, Some(TestTag::new(99)));
@@ -156,11 +144,11 @@ mod tests {
             stage,
             tag: Some(TestTag::new(123)),
         };
-
+        
         // Verify we can store and retrieve the struct with id
         assert_eq!(config.tag().as_ref().unwrap().id, 123);
     }
-
+    
     #[test]
     fn test_tag_forwarding_with_id() {
         let stage = Stage::new("test", "@compute @workgroup_size(1) fn main() {}", 2, 8);
@@ -168,7 +156,7 @@ mod tests {
             stage,
             tag: Some(TestTag::new(123)),
         };
-
+        
         // Forward a new tag
         let old_tag = config.forward_tag(Some(TestTag::new(456)));
         assert_eq!(old_tag.unwrap().id, 123);

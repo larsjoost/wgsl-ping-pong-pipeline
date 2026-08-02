@@ -41,10 +41,10 @@
 //!     let input: Vec<f32> = vec![0.0; 1024 * 4];
 //!     pipeline.write_input(&input).await?;
 //!
-//!     // Advance pipeline by 3 ticks (data propagates through 3 stages)
-//!     pipeline.tick(Some(1u64)).await?;
-//!     pipeline.tick(Some(1u64)).await?;
-//!     pipeline.tick(Some(1u64)).await?;
+//!     // Process data through 3-stage pipeline (first 2 calls return None, 3rd returns output)
+//!     pipeline.process(Some(1u64)).await?;
+//!     pipeline.process(Some(1u64)).await?;
+//!     pipeline.process(Some(1u64)).await?;
 //!
 //!     Ok(())
 //! }

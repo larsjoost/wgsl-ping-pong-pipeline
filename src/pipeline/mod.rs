@@ -196,9 +196,6 @@ pub struct Pipeline<T> {
     /// Side input buffers managed by the pipeline
     /// Maps from name to buffer
     side_inputs: HashMap<String, Arc<wgpu::Buffer>>,
-    /// The tag from the last tick() call's input
-    /// When this is None, it means no tick() has been called yet
-    last_output_tag: Option<T>,
     /// Per-buffer metadata: for each buffer, store submission metadata
     /// This allows tracking submission sizes through the pipeline without padding
     /// Index corresponds to buffer index in the buffers vec
@@ -363,7 +360,6 @@ impl<T> Pipeline<T> {
             stage_names,
             stage_configs,
             side_inputs: std::collections::HashMap::new(),
-            last_output_tag: None,
             buffer_submission_metadata: vec![None; num_buffers],
             default_n: batch_size, // Use batch_size as initial default_n
         };
@@ -457,69 +453,61 @@ impl<T> Pipeline<T> {
         )
     }
 
-    pub async fn tick(&mut self, tag: Option<T>) -> Result<()> {
+    pub async fn process(&mut self, tag: Option<T>) -> Result<Option<(Option<T>, Vec<f32>)>> {
+        let num_stages = self.compute_pipelines.len();
+        if num_stages == 0 {
+            bail!("Pipeline has no stages");
+        }
+
+        // Check if this call will produce output (delay line behavior)
+        // For N-stage pipeline: first N-1 calls return None, Nth call and beyond return Some
+        // tick_count represents the number of completed process() calls so far
+        let will_have_output = self.tick_count >= (num_stages as u64 - 1);
+
         let mut encoder =
             self.context
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some(&format!("Tick {} Encoder", self.tick_count)),
+                    label: Some(&format!("Process {} Encoder", self.tick_count)),
                 });
 
-        // Process tag flow through pipeline
-        // Insert tag into first stage, get its previous tag
-        // Then forward that tag to next stage, and so on
-        // In staggered mode, data takes N ticks to propagate through N stages
-
-        // Forward the tag through all stages to implement a delay line
-        // Each stage holds its tag for one tick, then passes it to the next stage
+        // Process tag flow through pipeline - delay line implementation
         let mut current_tag: Option<T> = tag;
         for i in 0..self.stage_configs.len() {
             current_tag = self.stage_configs[i].forward_tag(current_tag);
         }
 
-        // After forwarding through all stages, get the tag from the last stage
-        // This is the tag that has propagated through the pipeline (delayed by N stages)
-        // We take ownership to avoid cloning
-        if !self.stage_configs.is_empty() {
-            self.last_output_tag = match self.stage_configs.last_mut().unwrap() {
+        // Get the tag that has propagated through all stages (this will be returned with output)
+        let output_tag: Option<T> = if !self.stage_configs.is_empty() {
+            match self.stage_configs.last_mut().unwrap() {
                 StageConfig::Standard { tag, .. } => std::mem::take(tag),
                 StageConfig::Custom { tag, .. } => std::mem::take(tag),
-            };
+            }
         } else {
-            self.last_output_tag = None;
-        }
+            None
+        };
 
+        // Process all stages with compute passes
         for i in 0..self.stage_configs.len() {
-            // Global ping-pong: all stages read from set current_set and write to set (1 - current_set)
-            // Buffer layout grouped by set:
-            // - Set A (current_set=0): indices 0, 2, 4, 6... (input_A, stage0_out_A, stage1_out_A, ...)
-            // - Set B (current_set=1): indices 1, 3, 5, 7... (input_B, stage0_out_B, stage1_out_B, ...)
             let input_buffer_idx = 2 * i + self.current_set;
             let output_buffer_idx = 2 * i + 2 + (1 - self.current_set);
 
-            // Get the submission metadata from the input buffer and propagate to stage
-            // If no metadata is available, use default values
+            // Get submission metadata from input buffer
             let metadata = self.buffer_submission_metadata[input_buffer_idx];
             let (actual_elements, n) = match metadata {
                 Some((actual_elements, n, _batch_size)) => (actual_elements, n),
-                None => {
-                    // No metadata for this buffer, use default values
-                    // This happens when the pipeline hasn't been filled yet or data hasn't reached this stage
-                    // Use the pipeline's default values
-                    (self.batch_size, self.default_n)
-                }
+                None => (self.batch_size, self.default_n),
             };
 
-            // Update the stage with the actual elements and n from its input submission
+            // Update stage with metadata
             self.stage_configs[i].update_actual_total_elements(actual_elements)?;
             self.stage_configs[i].update_n(n)?;
 
+            // Process the stage
             match &self.stage_configs[i] {
                 StageConfig::Standard { .. } => {
-                    // Standard stage: use compute pipeline and bind groups
                     if let Some(compute_pipeline) = &self.compute_pipelines[i] {
-                        // Lazy initialization of bind groups for standard stages
-                        // We need 4 bind groups: 2 input variants × 2 output states
+                        // Lazy bind group initialization
                         if self.bind_groups[i].is_none() {
                             let bgs = [
                                 [
@@ -534,9 +522,6 @@ impl<T> Pipeline<T> {
                             self.bind_groups[i] = Some(bgs);
                         }
 
-                        // Select the appropriate bind group based on input buffer variant and output state
-                        // In global ping-pong mode, all stages use the same current_set for input
-                        // and write to (1 - current_set) for output
                         let input_buffer_variant = self.current_set;
                         let output_state = 1 - self.current_set;
                         let bind_group = &self.bind_groups[i].as_ref().unwrap()
@@ -544,7 +529,7 @@ impl<T> Pipeline<T> {
 
                         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                             label: Some(&format!(
-                                "Stage {} Pass Tick {}",
+                                "Stage {} Pass Process {}",
                                 self.stage_names[i], self.tick_count
                             )),
                             timestamp_writes: None,
@@ -559,35 +544,85 @@ impl<T> Pipeline<T> {
                     }
                 }
                 StageConfig::Custom { stage, .. } => {
-                    // Custom stage: call its encode method
                     let input_buffer = &self.buffers[input_buffer_idx];
                     let output_buffer = &self.buffers[output_buffer_idx];
-
-                    stage.encode(&mut encoder, input_buffer, output_buffer, &self.side_inputs)?
+                    stage.encode(&mut encoder, input_buffer, output_buffer, &self.side_inputs)?;
                 }
             }
 
-            // Propagate submission metadata to output buffer
-            // The output buffer is being written with data from the input buffer in this tick,
-            // so it should have the same metadata as the input buffer
+            // Propagate metadata to output buffer
             self.buffer_submission_metadata[output_buffer_idx] =
                 self.buffer_submission_metadata[input_buffer_idx];
         }
 
-        // Flip the current set for the next tick
-        self.current_set = 1 - self.current_set;
+        // Calculate last stage output buffer index BEFORE flipping current_set
+        // Last stage writes to: 2*(num_stages-1) + 2 + (1 - current_set) = 2*num_stages + (1 - current_set)
+        let last_output_buffer_idx = 2 * num_stages + (1 - self.current_set);
+        let read_buffer = &self.buffers[last_output_buffer_idx];
 
-        self.context.queue.submit(Some(encoder.finish()));
-        self.context.device_poll()?;
-        self.tick_count += 1;
+        // Calculate readback buffer size
+        let element_count = match self.buffer_submission_metadata[last_output_buffer_idx] {
+            Some((actual_elements, _n, _batch_size)) => actual_elements * self.vector_dim,
+            None => self.batch_size * self.vector_dim,
+        };
+        let buffer_size = std::cmp::min((element_count * F32_SIZE) as u64, read_buffer.size());
+        let element_count = buffer_size as usize / F32_SIZE;
 
-        Ok(())
+        // Add readback operations to the same encoder - this is the key optimization!
+        // We always do the copy, even when we won't return output, to keep the GPU busy
+        if buffer_size > 0 {
+            let readback_buffer = self.context.create_buffer(
+                Some("Output Readback"),
+                buffer_size,
+                readback_buffer_usages(),
+            );
+
+            encoder.copy_buffer_to_buffer(read_buffer, 0, &readback_buffer, 0, buffer_size);
+
+            // Flip the current set for the next process call
+            self.current_set = 1 - self.current_set;
+
+            self.context.queue.submit(Some(encoder.finish()));
+            self.context.device_poll()?;
+            self.tick_count += 1;
+
+            // If no output available yet, return None without reading the data
+            if !will_have_output {
+                return Ok(None);
+            }
+
+            // Read back the data
+            let buffer_slice = readback_buffer.slice(..);
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+                sender.send(result).unwrap();
+            });
+            use wgpu::PollType;
+            self.context.device.poll(PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })?;
+
+            receiver
+                .recv()
+                .map_err(|_| anyhow::anyhow!("Channel closed"))??;
+            let data: &[u8] = &buffer_slice.get_mapped_range();
+            let result: Vec<f32> = bytemuck::cast_slice(&data[..element_count * F32_SIZE]).to_vec();
+
+            return Ok(Some((output_tag, result)));
+        } else {
+            // Flip the current set for the next process call
+            self.current_set = 1 - self.current_set;
+
+            self.context.queue.submit(Some(encoder.finish()));
+            self.context.device_poll()?;
+            self.tick_count += 1;
+
+            return Ok(None);
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        if self.last_output_tag.is_some() {
-            return false;
-        }
         for i in 0..self.stage_configs.len() {
             if !self.stage_configs[i].is_empty() {
                 return false;
@@ -670,76 +705,7 @@ impl<T> Pipeline<T> {
         Ok(())
     }
 
-    pub async fn read_output(&mut self) -> Result<Option<(Option<T>, Vec<f32>)>> {
-        // Return None if no tick has been called yet (tag is None)
-        if self.last_output_tag.is_none() {
-            return Ok(None);
-        }
 
-        let num_stages = self.compute_pipelines.len();
-        if num_stages == 0 {
-            bail!("Pipeline has no stages");
-        }
-
-        // Output is in the last stage's current output buffer
-        // Buffer layout: [input_A, input_B, stage0_out_A, stage0_out_B, stage1_out_A, stage1_out_B, ...]
-        // With global ping-pong:
-        // - Last stage (num_stages-1) reads from buffer 2*(num_stages-1) + current_set
-        // - Last stage writes to buffer 2*(num_stages-1) + 2 + (1 - current_set) = 2*num_stages + (1 - current_set)
-        // But we flipped current_set after the tick, so the last written buffer is:
-        // 2*num_stages + current_set (because current_set was flipped)
-        // Wait, let's think again:
-        // During the tick (before flip): current_set = X, last stage writes to 2*(n-1) + 2 + (1-X) = 2*n + (1-X)
-        // After flip: current_set = 1 - X
-        // So the last written buffer is 2*n + (1-X) = 2*n + current_set
-        let last_output_buffer_idx = 2 * num_stages + self.current_set;
-        let read_buffer = &self.buffers[last_output_buffer_idx];
-
-        let element_count = match self.buffer_submission_metadata[last_output_buffer_idx] {
-            Some((actual_elements, _n, _batch_size)) => actual_elements * self.vector_dim,
-            None => self.batch_size * self.vector_dim,
-        };
-        let buffer_size = std::cmp::min((element_count * F32_SIZE) as u64, read_buffer.size());
-        let element_count = buffer_size as usize / F32_SIZE;
-
-        let readback_buffer = self.context.create_buffer(
-            Some("Output Readback"),
-            buffer_size,
-            readback_buffer_usages(),
-        );
-
-        let mut encoder =
-            self.context
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Readback Encoder"),
-                });
-
-        encoder.copy_buffer_to_buffer(read_buffer, 0, &readback_buffer, 0, buffer_size);
-        self.context.queue.submit(Some(encoder.finish()));
-        self.context.device_poll()?;
-
-        let buffer_slice = readback_buffer.slice(..);
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            sender.send(result).unwrap();
-        });
-        use wgpu::PollType;
-        self.context.device.poll(PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        })?;
-
-        receiver
-            .recv()
-            .map_err(|_| anyhow::anyhow!("Channel closed"))??;
-        let data: &[u8] = &buffer_slice.get_mapped_range();
-        let result: Vec<f32> = bytemuck::cast_slice(&data[..element_count * F32_SIZE]).to_vec();
-
-        let output_tag = self.last_output_tag.take();
-
-        Ok(Some((output_tag, result)))
-    }
 
     pub async fn resize(&mut self, new_batch_size: usize) -> Result<()> {
         if new_batch_size == 0 {
