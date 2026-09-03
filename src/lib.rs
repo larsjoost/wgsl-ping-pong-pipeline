@@ -37,14 +37,13 @@
 //!         .build()
 //!         .await?;
 //!
-//!     // Write input data
-//!     let input: Vec<f32> = vec![0.0; 1024 * 4];
-//!     pipeline.write_input(&input).await?;
-//!
-//!     // Process data through 3-stage pipeline (first 2 calls return None, 3rd returns output)
-//!     pipeline.process(Some(1u64)).await?;
-//!     pipeline.process(Some(1u64)).await?;
-//!     pipeline.process(Some(1u64)).await?;
+//!     // Process data through 3-stage pipeline
+//!     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+//!     pipeline.process(Some(&input), 1u64).await?;
+//!     pipeline.process(None, 1u64).await?;
+//!     let Some((_tag, output)) = pipeline.process(None, 1u64).await? else {
+//!         panic!("Expected output");
+//!     };
 //!
 //!     Ok(())
 //! }

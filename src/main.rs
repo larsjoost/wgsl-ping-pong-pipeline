@@ -69,21 +69,17 @@ async fn main() -> anyhow::Result<()> {
         8.0, 80.0, // Vector 7: x=8, y=80
     ];
 
-    // Write input to stage 0
-    pipeline.write_input(&input).await?;
-    println!("Input written to pipeline");
-
-    // Advance pipeline by 3 process calls (data needs 3 calls to propagate through 3 stages)
+    // Process data through the pipeline (first 2 calls return None, 3rd returns output)
     // We use a simple tag (u64) to track the data flow
     let tag = 1u64;
-    pipeline.process(Some(tag)).await?; // Call 1: returns None (data in stage 1)
+    pipeline.process(Some(&input), tag).await?; // Call 1: returns None (data in stage 1)
     println!("Process 1: Data in stage 1");
 
-    pipeline.process(Some(2u64)).await?; // Call 2: returns None (data in stage 2)
+    pipeline.process(None, 2u64).await?; // Call 2: returns None (data in stage 2)
     println!("Process 2: Data in stage 2");
 
     // Call 3: returns Some with output (data has propagated through all 3 stages)
-    let Some((output_tag, output)) = pipeline.process(Some(3u64)).await? else {
+    let Some((output_tag, output)) = pipeline.process(None, 3u64).await? else {
         println!("Output not ready yet");
         return Ok(());
     };

@@ -2,7 +2,6 @@
 
 use crate::wgpu_utils::{ComputeContext, readback_buffer_usages, stage_buffer_usages};
 use anyhow::{Result, bail};
-use bytemuck::Pod;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -453,10 +452,51 @@ impl<T> Pipeline<T> {
         )
     }
 
-    pub async fn process(&mut self, tag: Option<T>) -> Result<Option<(Option<T>, Vec<f32>)>> {
+    pub async fn process(&mut self, data: Option<&[f32]>, tag: T) -> Result<Option<(T, Vec<f32>)>> {
         let num_stages = self.compute_pipelines.len();
         if num_stages == 0 {
             bail!("Pipeline has no stages");
+        }
+
+        // Handle data writing if provided (replaces write_input)
+        if let Some(data_slice) = data {
+            let actual_byte_size = data_slice.len() * F32_SIZE;
+            if actual_byte_size == 0 {
+                bail!("Input data cannot be empty");
+            }
+
+            let element_size = self.vector_dim * F32_SIZE;
+            if !actual_byte_size.is_multiple_of(element_size) {
+                bail!(
+                    "Input byte size {} is not a multiple of element size {} (vector_dim {} * F32_SIZE {})",
+                    actual_byte_size,
+                    element_size,
+                    self.vector_dim,
+                    F32_SIZE
+                );
+            }
+
+            let actual_batch_size = actual_byte_size / element_size;
+            // Write to the input buffer that will be read by Stage 0 in the current tick
+            // Stage 0 reads from buffer `current_set` (either 0 or 1)
+            let write_idx = self.current_set;
+
+            if actual_byte_size as u64 > self.buffers[write_idx].size() {
+                let new_batch_size = std::cmp::max(actual_batch_size, self.batch_size);
+                self.resize(new_batch_size).await?;
+            }
+
+            // Write to the current input buffer
+            self.context
+                .queue
+                .write_buffer(&self.buffers[write_idx], 0, bytemuck::cast_slice(data_slice));
+
+            let custom_n = match self.buffer_submission_metadata[write_idx] {
+                Some((_, custom_n, _)) => custom_n,
+                None => self.default_n,
+            };
+            self.buffer_submission_metadata[write_idx] =
+                Some((actual_batch_size, custom_n, actual_batch_size));
         }
 
         // Check if this call will produce output (delay line behavior)
@@ -472,20 +512,10 @@ impl<T> Pipeline<T> {
                 });
 
         // Process tag flow through pipeline - delay line implementation
-        let mut current_tag: Option<T> = tag;
+        let mut current_tag: Option<T> = Some(tag);
         for i in 0..self.stage_configs.len() {
             current_tag = self.stage_configs[i].forward_tag(current_tag);
         }
-
-        // Get the tag that has propagated through all stages (this will be returned with output)
-        let output_tag: Option<T> = if !self.stage_configs.is_empty() {
-            match self.stage_configs.last_mut().unwrap() {
-                StageConfig::Standard { tag, .. } => std::mem::take(tag),
-                StageConfig::Custom { tag, .. } => std::mem::take(tag),
-            }
-        } else {
-            None
-        };
 
         // Process all stages with compute passes
         for i in 0..self.stage_configs.len() {
@@ -609,6 +639,16 @@ impl<T> Pipeline<T> {
             let data: &[u8] = &buffer_slice.get_mapped_range();
             let result: Vec<f32> = bytemuck::cast_slice(&data[..element_count * F32_SIZE]).to_vec();
 
+            // Extract the tag from the last stage - it should be present when output is available
+            let output_tag: T = if !self.stage_configs.is_empty() {
+                match self.stage_configs.last_mut().unwrap() {
+                    StageConfig::Standard { tag, .. } => std::mem::take(tag).expect("Tag should be present when output is available"),
+                    StageConfig::Custom { tag, .. } => std::mem::take(tag).expect("Tag should be present when output is available"),
+                }
+            } else {
+                panic!("No stages configured");
+            };
+
             return Ok(Some((output_tag, result)));
         } else {
             // Flip the current set for the next process call
@@ -663,47 +703,7 @@ impl<T> Pipeline<T> {
         self.buffer_submission_metadata.fill(None);
     }
 
-    pub async fn write_input<D: Pod>(&mut self, data: &[D]) -> Result<()> {
-        let actual_byte_size = std::mem::size_of_val(data);
-        if actual_byte_size == 0 {
-            bail!("Input data cannot be empty");
-        }
 
-        let element_size = self.vector_dim * F32_SIZE;
-        if !actual_byte_size.is_multiple_of(element_size) {
-            bail!(
-                "Input byte size {} is not a multiple of element size {} (vector_dim {} * F32_SIZE {})",
-                actual_byte_size,
-                element_size,
-                self.vector_dim,
-                F32_SIZE
-            );
-        }
-
-        let actual_batch_size = actual_byte_size / element_size;
-        // Write to the input buffer that will be read by Stage 0 in the current tick
-        // Stage 0 reads from buffer `current_set` (either 0 or 1)
-        let write_idx = self.current_set;
-
-        if actual_byte_size as u64 > self.buffers[write_idx].size() {
-            let new_batch_size = std::cmp::max(actual_batch_size, self.batch_size);
-            self.resize(new_batch_size).await?;
-        }
-
-        // Write to the current input buffer
-        self.context
-            .queue
-            .write_buffer(&self.buffers[write_idx], 0, bytemuck::cast_slice(data));
-
-        let custom_n = match self.buffer_submission_metadata[write_idx] {
-            Some((_, custom_n, _)) => custom_n,
-            None => self.default_n,
-        };
-        self.buffer_submission_metadata[write_idx] =
-            Some((actual_batch_size, custom_n, actual_batch_size));
-
-        Ok(())
-    }
 
 
 

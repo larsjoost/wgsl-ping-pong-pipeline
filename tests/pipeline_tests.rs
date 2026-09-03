@@ -30,10 +30,9 @@ async fn test_single_stage_identity() -> anyhow::Result<()> {
 
     // Input: 4 vectors of 2D (batch_size=4, vector_dim=2 = 8 f32 values)
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-    pipeline.write_input(&input).await?;
 
     // Process once (data propagates through 1 stage and output is available)
-    let Some((_tag, output)) = pipeline.process(Some(1u64)).await? else {
+    let Some((_tag, output)) = pipeline.process(Some(&input), 1u64).await? else {
         panic!("Output should be ready after processing");
     };
 
@@ -52,13 +51,12 @@ async fn test_two_stage_identity() -> anyhow::Result<()> {
     assert_eq!(pipeline.num_stages(), 2);
 
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-    pipeline.write_input(&input).await?;
 
     // First process: returns None (data needs 2 calls for 2 stages)
-    pipeline.process(Some(1u64)).await?;
+    pipeline.process(Some(&input), 1u64).await?;
     
     // Second process: returns Some with output
-    let Some((_tag, output)) = pipeline.process(Some(1u64)).await? else {
+    let Some((_tag, output)) = pipeline.process(None, 1u64).await? else {
         panic!("Output should be ready after second process");
     };
     assert_eq!(output, input);
@@ -81,14 +79,13 @@ async fn test_three_stage_identity() -> anyhow::Result<()> {
     assert_eq!(pipeline.num_stages(), 3);
 
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0];
-    pipeline.write_input(&input).await?;
 
     // First two processes: return None (data needs 3 calls for 3 stages)
-    pipeline.process(Some(1u64)).await?;
-    pipeline.process(Some(1u64)).await?;
+    pipeline.process(Some(&input), 1u64).await?;
+    pipeline.process(None, 1u64).await?;
     
     // Third process: returns Some with output
-    let Some((_tag, output)) = pipeline.process(Some(1u64)).await? else {
+    let Some((_tag, output)) = pipeline.process(None, 1u64).await? else {
         panic!("Output should be ready after third process");
     };
     assert_eq!(output, input);
@@ -103,13 +100,12 @@ async fn test_single_stage_double() -> anyhow::Result<()> {
 
     // Input: [1,2, 3,4, 5,6, 7,8] (4 vectors of 2D)
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-    pipeline.write_input(&input).await?;
     
     // Expected: [2,4, 6,8, 10,12, 14,16]
     let expected: Vec<f32> = vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
 
     // Process once to process and get output
-    let Some((_tag, output)) = pipeline.process(Some(1u64)).await? else {
+    let Some((_tag, output)) = pipeline.process(Some(&input), 1u64).await? else {
         panic!("Output should be ready after processing");
     };
     assert_eq!(output, expected);
@@ -128,28 +124,26 @@ async fn test_change_write_data_size_during_operation() -> anyhow::Result<()> {
         .build()
         .await?;
 
-    // 1. Write first data (8 floats = 4 vectors of 2D)
+    // 1. Process first data (8 floats = 4 vectors of 2D)
     let input1: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-    pipeline.write_input(&input1).await?;
-
+    
     // 2. Process twice for 2-stage pipeline (staggered mode)
-    pipeline.process(Some(1u64)).await?;
+    pipeline.process(Some(&input1), 1u64).await?;
     
     // 3. Second process: returns Some with output
-    let Some((_tag, output1)) = pipeline.process(Some(1u64)).await? else {
+    let Some((_tag, output1)) = pipeline.process(None, 1u64).await? else {
         panic!("First output should be ready");
     };
     assert_eq!(output1, input1);
 
-    // 4. Write second data (8 floats)
+    // 4. Process second data (8 floats)
     let input2: Vec<f32> = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
-    pipeline.write_input(&input2).await?;
-
+    
     // 5. Process twice
-    pipeline.process(Some(2u64)).await?;
+    pipeline.process(Some(&input2), 2u64).await?;
     
     // 6. Second process: returns Some with output
-    let Some((_tag, output2)) = pipeline.process(Some(2u64)).await? else {
+    let Some((_tag, output2)) = pipeline.process(None, 2u64).await? else {
         panic!("Second output should be ready");
     };
     assert_eq!(output2, input2);
@@ -184,28 +178,26 @@ async fn test_tag_follows_data_without_clone() -> anyhow::Result<()> {
 
     // Input data: 4 vectors of 2D (8 f32 values)
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-    pipeline.write_input(&input).await?;
 
     // Process with a specific tag - output should be available immediately for 1-stage pipeline
     let tag1 = NonCloneTag::new(42, "first");
-    let Some((returned_tag, output)) = pipeline.process(Some(tag1)).await? else {
+    let Some((returned_tag, output)) = pipeline.process(Some(&input), tag1).await? else {
         panic!("Output should be ready after processing");
     };
 
     // Verify the tag is returned correctly
-    assert_eq!(returned_tag, Some(NonCloneTag::new(42, "first")));
+    assert_eq!(returned_tag, NonCloneTag::new(42, "first"));
     assert_eq!(output, input);
 
-    // Write new data and process with a different tag
+    // Process new data with a different tag
     let input2: Vec<f32> = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
-    pipeline.write_input(&input2).await?;
 
     let tag2 = NonCloneTag::new(99, "second");
-    let Some((returned_tag, output)) = pipeline.process(Some(tag2)).await? else {
+    let Some((returned_tag, output)) = pipeline.process(Some(&input2), tag2).await? else {
         panic!("Output should be ready after processing");
     };
 
-    assert_eq!(returned_tag, Some(NonCloneTag::new(99, "second")));
+    assert_eq!(returned_tag, NonCloneTag::new(99, "second"));
     assert_eq!(output, input2);
 
     Ok(())
@@ -225,21 +217,20 @@ async fn test_tag_follows_data_through_multiple_stages() -> anyhow::Result<()> {
 
     // Input data
     let input: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-    pipeline.write_input(&input).await?;
 
     // First process with tag - data is in stage 0, not yet at output
     let tag1 = NonCloneTag::new(123, "first");
-    let result1 = pipeline.process(Some(tag1)).await?;
+    let result1 = pipeline.process(Some(&input), tag1).await?;
     assert!(result1.is_none(), "Output should not be ready after first process in 2-stage pipeline");
 
     // Second process with tag - data propagates to stage 1 and output is ready
     let tag2 = NonCloneTag::new(456, "second");
-    let Some((returned_tag, output)) = pipeline.process(Some(tag2)).await? else {
+    let Some((returned_tag, output)) = pipeline.process(None, tag2).await? else {
         panic!("Output should be ready after second process");
     };
 
     // Verify tag from first process follows the data (delay line behavior)
-    assert_eq!(returned_tag, Some(NonCloneTag::new(123, "first")));
+    assert_eq!(returned_tag, NonCloneTag::new(123, "first"));
     assert_eq!(output, input);
 
     Ok(())
