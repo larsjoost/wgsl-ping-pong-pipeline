@@ -515,8 +515,8 @@ impl<T> Pipeline<T> {
 
         // Process tag flow through pipeline - delay line implementation
         let mut current_tag: Option<T> = Some(tag);
-        for i in 0..self.stage_configs.len() {
-            current_tag = self.stage_configs[i].forward_tag(current_tag);
+        for stage in &mut self.stage_configs {
+            current_tag = stage.forward_tag(current_tag);
         }
 
         // Process all stages with compute passes
@@ -668,12 +668,7 @@ impl<T> Pipeline<T> {
     }
 
     pub fn is_empty(&self) -> bool {
-        for i in 0..self.stage_configs.len() {
-            if !self.stage_configs[i].is_empty() {
-                return false;
-            }
-        }
-        true
+        self.stage_configs.iter().all(|stage| stage.is_empty())
     }
 
     /// Sets the default n value for the pipeline.
