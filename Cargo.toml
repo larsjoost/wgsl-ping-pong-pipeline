@@ -1,6 +1,6 @@
 [package]
 name = "wgsl-ping-pong-pipeline"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A high-throughput pipelined compute cascade using WGSL and wgpu with isolated per-stage ping-pong buffers for maximum parallel throughput"
 license = "MIT"
