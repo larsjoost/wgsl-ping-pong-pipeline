@@ -110,7 +110,7 @@ pub struct VariableSizePipeline<T> {
     compute_pipelines: Vec<Option<Arc<wgpu::ComputePipeline>>>,
     /// Bind group layouts for each stage
     bind_group_layouts: Vec<Arc<wgpu::BindGroupLayout>>,
-    /// Bind groups for standard stages: [[input_variant][output_state]]
+    /// Bind groups for standard stages: [[input_variant][output_set]]
     bind_groups: Vec<Option<[[wgpu::BindGroup; 2]; 2]>>,
     /// Current buffer set to read from (0 or 1)
     /// All stages read from buffers in set `current_set` and write to buffers in set `1 - current_set`
