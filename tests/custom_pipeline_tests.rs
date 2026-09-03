@@ -217,7 +217,8 @@ impl PipelineStage for WgslCustomStage {
 
         // Calculate dispatch count
         let workgroup_size = 64u32;
-        let dispatch_count = (self.batch_size as u32 * self.vector_dim as u32).div_ceil(workgroup_size);
+        let dispatch_count =
+            (self.batch_size as u32 * self.vector_dim as u32).div_ceil(workgroup_size);
         pass.dispatch_workgroups(dispatch_count, 1, 1);
 
         Ok(())
