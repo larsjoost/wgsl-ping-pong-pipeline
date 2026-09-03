@@ -171,7 +171,7 @@ pub struct Pipeline<T> {
     /// Buffer layout grouped by set:
     /// - Set A (read when current_set=0): indices 0, 2, 4, 6... (input_A, stage0_out_A, stage1_out_A, ...)
     /// - Set B (read when current_set=1): indices 1, 3, 5, 7... (input_B, stage0_out_B, stage1_out_B, ...)
-    /// For N stages, we need 2 input buffers + 2*N output buffers
+    ///   For N stages, we need 2 input buffers + 2*N output buffers
     buffers: Vec<Arc<wgpu::Buffer>>,
     /// Compute pipelines for each stage (only for standard stages)
     compute_pipelines: Vec<Option<Arc<wgpu::ComputePipeline>>>,
@@ -487,9 +487,11 @@ impl<T> Pipeline<T> {
             }
 
             // Write to the current input buffer
-            self.context
-                .queue
-                .write_buffer(&self.buffers[write_idx], 0, bytemuck::cast_slice(data_slice));
+            self.context.queue.write_buffer(
+                &self.buffers[write_idx],
+                0,
+                bytemuck::cast_slice(data_slice),
+            );
 
             let custom_n = match self.buffer_submission_metadata[write_idx] {
                 Some((_, custom_n, _)) => custom_n,
@@ -640,16 +642,19 @@ impl<T> Pipeline<T> {
             let result: Vec<f32> = bytemuck::cast_slice(&data[..element_count * F32_SIZE]).to_vec();
 
             // Extract the tag from the last stage - it should be present when output is available
-            let output_tag: T = if !self.stage_configs.is_empty() {
-                match self.stage_configs.last_mut().unwrap() {
-                    StageConfig::Standard { tag, .. } => std::mem::take(tag).expect("Tag should be present when output is available"),
-                    StageConfig::Custom { tag, .. } => std::mem::take(tag).expect("Tag should be present when output is available"),
-                }
-            } else {
-                panic!("No stages configured");
-            };
+            let output_tag: T =
+                if !self.stage_configs.is_empty() {
+                    match self.stage_configs.last_mut().unwrap() {
+                        StageConfig::Standard { tag, .. } => std::mem::take(tag)
+                            .expect("Tag should be present when output is available"),
+                        StageConfig::Custom { tag, .. } => std::mem::take(tag)
+                            .expect("Tag should be present when output is available"),
+                    }
+                } else {
+                    panic!("No stages configured");
+                };
 
-            return Ok(Some((output_tag, result)));
+            Ok(Some((output_tag, result)))
         } else {
             // Flip the current set for the next process call
             self.current_set = 1 - self.current_set;
@@ -658,7 +663,7 @@ impl<T> Pipeline<T> {
             self.context.device_poll()?;
             self.tick_count += 1;
 
-            return Ok(None);
+            Ok(None)
         }
     }
 
@@ -702,10 +707,6 @@ impl<T> Pipeline<T> {
     pub fn clear_all_buffer_metadata(&mut self) {
         self.buffer_submission_metadata.fill(None);
     }
-
-
-
-
 
     pub async fn resize(&mut self, new_batch_size: usize) -> Result<()> {
         if new_batch_size == 0 {

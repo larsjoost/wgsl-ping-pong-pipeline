@@ -432,7 +432,6 @@ impl<T> VariableSizePipeline<T> {
 
         // Process each stage with global ping-pong
         for i in 0..self.stage_configs.len() {
-
             // Global ping-pong: all stages read from set current_set and write to set (1 - current_set)
             // Buffer layout grouped by set:
             // - Set A (current_set=0): indices 0, 2, 4, 6... (input_A, stage0_out_A, stage1_out_A, ...)

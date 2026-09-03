@@ -83,7 +83,10 @@ async fn main() -> anyhow::Result<()> {
         println!("Output not ready yet");
         return Ok(());
     };
-    println!("Process 3: Data in stage 3 (output ready), output tag: {:?}", output_tag);
+    println!(
+        "Process 3: Data in stage 3 (output ready), output tag: {:?}",
+        output_tag
+    );
     println!("Output: {:?}", output);
 
     // Expected output: identity -> double -> add_one
