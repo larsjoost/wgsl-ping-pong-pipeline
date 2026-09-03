@@ -49,6 +49,7 @@
 //! }
 //! ```
 
+#![recursion_limit = "512"]
 //#![warn(missing_docs)]
 #![warn(clippy::all)]
 
