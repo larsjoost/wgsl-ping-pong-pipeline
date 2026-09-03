@@ -9,7 +9,7 @@ homepage = "https://github.com/larsjoost/wgsl-ping-pong-pipeline"
 documentation = "https://docs.rs/wgsl-ping-pong-pipeline"
 
 [dependencies]
-wgpu = { version = "29.0", features = ["spirv"] }
+wgpu = { version = "29.0", features = ["spirv", "serde"] }
 pollster = { version = "0.3", features = ["macro"] }
 bytemuck = { version = "1.12", features = ["derive"] }
 anyhow = "1.0"
